@@ -1,0 +1,1846 @@
+---
+title: "Analysis_00_prone_incidence_allsite_eda"
+author: "Chad Hochberg"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+#Specify Project Location and File Type
+```{r}
+project_location <- '~/Library/CloudStorage/OneDrive-JohnsHopkins/Research Projects/CLIF/CLIF_Projects/ProneProjects/ProningEpi/ProneSevereARF_Output'
+file_type <- 'csv'
+
+#Create Sub Folders within Project Folder
+# Check if the output directory exists; if not, create it
+if (!dir.exists(paste0(project_location, "/summary_analysis"))) {
+  dir.create(paste0(project_location, "/summary_analysis"))
+}
+```
+
+```{r Load Needed Libraries, include=FALSE}
+packages <- c( 
+              "lubridate", 
+              "tidyverse", 
+              "dplyr",
+              "table1", 
+              "broom", 
+              "arrow", 
+              "viridis", 
+              "fst", 
+              "data.table", 
+              "collapse",
+              "forcats",
+              "MetBrewer")
+
+install_if_missing <- function(package) {
+  if (!require(package, character.only = TRUE)) {
+    install.packages(package, dependencies = TRUE)
+    library(package, character.only = TRUE)
+  }
+}
+
+sapply(packages, install_if_missing)
+rm(packages, install_if_missing)
+
+#Use Dplyr select as default
+select <- dplyr::select
+
+```
+
+```{r Vectors to Make File Names for Import}
+#List of Sites Participating
+sites <- c('Hopkins', 'NU', 'OHSU', 'Penn', 'U Michigan', 'RUSH', 'UMN', "Sunnybrook", "UCMC")
+
+#List of tables created by proning scripts - WITHOUT Site Name
+tables <- c("_Table1_by_Hospital", 
+            "_Table1_by_period",
+            "_Table_Prone_Outcomes_Period",
+            "_prone_per_quarter",
+            "_prone_per_quarter-sarscoV2_status",
+            "_prone_per_period",
+            "_pfratio_sample_size",
+            "_aggregate_expected_prone",
+            "_aggregate_expected_prone_wCOVID-Status",
+            "_propensity_build_estimates",
+            "_propensity_build_covariance",
+            "_global_aggregate_pronerisk_by_outcome",
+            "_global_aggregate_pronerisk_by_outcome_period",
+            "_global_aggregate_expected_prone_wCOVID-Status_post",
+            "_global_aggregate_expected_prone_wCOVID-Status")
+
+# Combine sites and tables to create full table names
+site_tables <- as.vector(outer(sites, tables, paste, sep = ""))
+
+# Print the result
+site_tables
+```
+```{r Open Tables}
+
+# Create an empty list to store data frames
+site_table_data <- list()
+
+# Loop through each site and each table name
+for (site in sites) {
+  # Construct the directory path for the current site
+  site_directory <- file.path(project_location, site)  
+
+  for (table_name in tables) {
+    # Construct the full file path for the CSV
+    file_path <- file.path(site_directory, paste0(site, table_name, ".", file_type))
+    
+    # Check if the file exists before reading
+    if (file.exists(file_path)) {
+      # Use a combined key of site and table name to store the data frame in the list
+      site_table_data[[paste(site,table_name, sep="")]] <- fread(file_path)
+    } else {
+      message(paste("File not found:", file_path))
+    }
+  }
+}
+
+# Print the names of loaded tables
+names(site_table_data)
+
+```
+```{r Collate Data Function}
+# Function to extract and collate specified tables from the site_table_data list
+#This Will Only Work with Tables with the Same Number of Columns
+collate_tables <- function(table_suffix) {
+  # Extract only data frames that match the pattern "[SITE]_table_suffix"
+  table_list <- lapply(sites, function(site) {
+    # Construct the key to extract the correct data frame
+    table_name <- paste(site, table_suffix, sep = "")
+    
+    if (table_name %in% names(site_table_data)) {
+      # Add the 'site' column and return the modified data frame
+      df <- site_table_data[[table_name]]
+      df$site <- site
+      return(df)
+    } else {
+      message(paste("Table not found for site:", site))
+      return(NULL)  # Return NULL if the table isn't found
+    }
+  })
+  
+  # Filter out NULL elements (sites that didn't have the table)
+  table_list <- Filter(Negate(is.null), table_list)
+  
+  # Combine all data frames into one using rbind
+  combined_table <- do.call(rbind, table_list)
+  
+  return(combined_table)
+}
+```
+
+
+```{r Repeat for Prone by Quarter}
+# Example usage: Collate all "[SITE]_Table1_by_Hospital"
+prone_per_quarter <- collate_tables("_prone_per_quarter")  |>
+  select(-study_period)
+
+#Create Overall N by Month As Well As N-proned and the like 
+temp_overall_prone <- prone_per_quarter |>
+  group_by(study_quarter) |>
+  summarise(
+    n_patients = sum(n_patients, na.rm = TRUE),
+    sars_cov2_positive = sum(sars_cov2_positive, na.rm=T),
+    n_proned_12_hr = sum(n_proned_12_hr, na.rm = TRUE),
+    proned_12_hr_percent = n_proned_12_hr/n_patients,
+    standard_error_12 = sqrt(proned_12_hr_percent * (1 - proned_12_hr_percent) / n_patients),
+    n_proned_24_hr = sum(n_proned_24_hr, na.rm = TRUE),
+    proned_24_hr_percent = n_proned_24_hr/n_patients,
+    standard_error_24 = sqrt(proned_24_hr_percent * (1 - proned_24_hr_percent) / n_patients),
+    n_proned_72_hr = sum(n_proned_72_hr, na.rm = TRUE),
+    proned_72_hr_percent = n_proned_72_hr/n_patients,
+    standard_error_72 = sqrt(proned_72_hr_percent * (1 - proned_72_hr_percent) / n_patients),
+    n_proned_all = sum(n_proned_all, na.rm = TRUE),
+    proned_percent_all = n_proned_all/n_patients,
+    standard_error_all = sqrt(proned_percent_all * (1 - proned_percent_all) / n_patients),
+  ) |>
+  ungroup() |>
+  mutate(site='all_sites')
+
+#How Many Hospitals Overall?
+n_hospitals <- prone_per_quarter |>
+  group_by(site) |>
+  filter(row_number()==1) |>
+  ungroup() |>
+  summarise(n_hospitals=sum(n_hospitals)) 
+
+#Merge Back in With Temp File
+temp_overall_prone <- temp_overall_prone |>
+  mutate(n_hospitals=n_hospitals$n_hospitals)
+
+#Now Bind Together
+prone_per_quarter <- rbind(prone_per_quarter, temp_overall_prone)
+```
+
+```{r Prone Per Quarter Summarized with SARS COV2 Status}
+# Example usage: Collate all "[SITE]_Table1_by_Hospital"
+prone_per_quarter_covid <- collate_tables("_prone_per_quarter-sarscoV2_status")  |>
+  select(-study_period)
+
+#Create Overall N by Quarter As Well As N-proned and the like 
+temp_overall_prone_covid <- prone_per_quarter_covid |>
+  group_by(study_quarter, sars_cov2_positive) |>
+  summarise(
+    n_patients = sum(n_patients, na.rm = TRUE),
+    n_proned_12_hr = sum(n_proned_12_hr, na.rm = TRUE),
+    proned_12_hr_percent = n_proned_12_hr/n_patients,
+    standard_error_12 = sqrt(proned_12_hr_percent * (1 - proned_12_hr_percent) / n_patients),
+    n_proned_24_hr = sum(n_proned_24_hr, na.rm = TRUE),
+    proned_24_hr_percent = n_proned_24_hr/n_patients,
+    standard_error_24 = sqrt(proned_24_hr_percent * (1 - proned_24_hr_percent) / n_patients),
+    n_proned_72_hr = sum(n_proned_72_hr, na.rm = TRUE),
+    proned_72_hr_percent = n_proned_72_hr/n_patients,
+    standard_error_72 = sqrt(proned_72_hr_percent * (1 - proned_72_hr_percent) / n_patients),
+    n_proned_all = sum(n_proned_all, na.rm = TRUE),
+    proned_percent_all = n_proned_all/n_patients,
+    standard_error_all = sqrt(proned_percent_all * (1 - proned_percent_all) / n_patients),
+  ) |>
+  ungroup() |>
+  mutate(site='all_sites')
+
+#How Many Hospitals Overall?
+n_hospitals <- prone_per_quarter_covid |>
+  group_by(site) |>
+  filter(row_number()==1) |>
+  ungroup() |>
+  summarise(n_hospitals=sum(n_hospitals)) 
+
+#Merge Back in With Temp File
+temp_overall_prone_covid <- temp_overall_prone_covid |>
+  mutate(n_hospitals=n_hospitals$n_hospitals)
+
+#Now Bind Together
+prone_per_quarter_covid <- rbind(prone_per_quarter_covid, temp_overall_prone_covid)
+```
+
+```{r Create Summary Graph of Proning By Quarter}
+# Reorder 'site_name' based on 'sample_size' and update pipeline
+prone_per_quarter <- prone_per_quarter |>
+  group_by(site) |>
+  mutate(sample_size = sum(n_patients)) |>
+  ungroup() |>
+  mutate(site_name= fcase(
+    site == 'all_sites', 'Overall',
+    site == 'Hopkins', 'Hopkins',
+    site == 'UMN', 'U Minnesota',
+    site == 'Penn', 'U Penn',
+    site =='NU', 'Northwestern',
+    site =='U Michigan', 'U Michigan',
+    site == 'UCMC', 'U Chicago',
+    site == 'RUSH', 'Rush',
+    site == 'OHSU', 'OHSU',
+    site == 'Sunnybrook', 'Sunnybrook'),
+    site_name = fct_reorder(paste0(site_name, ", n=", sample_size), sample_size, .desc = TRUE))
+
+# Define the range and labels for quarters
+min_quarter <- min(prone_per_quarter$study_quarter)
+max_quarter <- max(prone_per_quarter$study_quarter)
+
+quarter_labels <- c(
+  '2018:1-3', '', '2018:7-9', '',
+  '2019:1-3', '', '2019:7-9', '',
+  '2020:1-3', '', '2020:7-9', '',
+  '2021:1-3', '', '2021:7-9', '',
+  '2022:1-3', '', '2022:7-9', '',
+  '2023:1-3', '', '2023:7-9', '',
+  '2024:1-3', '', '2024:7-9', '')
+study_quarter_labels <- quarter_labels[min_quarter:max_quarter]
+
+# Create the plot with reordered legend and 'Overall' in legend
+base_plot <- ggplot(prone_per_quarter[prone_per_quarter$site == 'all_sites', ],
+                    aes(x = study_quarter, y = proned_12_hr_percent)) +
+  geom_errorbar(aes(
+    ymin = proned_12_hr_percent - (1.96 * standard_error_12), 
+    ymax = proned_12_hr_percent + (1.96 * standard_error_12)), 
+    width = 0.20, color = 'darkgrey', linewidth = 1.05) +
+  geom_point() +
+  geom_line(linewidth = 1.05, aes(color = site_name)) + # Include 'Overall' in legend
+  geom_line(data = prone_per_quarter[prone_per_quarter$site != 'all_sites', ],
+            aes(x = study_quarter, y = proned_12_hr_percent, 
+                color = site_name), alpha = 0.2,
+            linewidth = 0.90) +
+  scale_color_viridis_d(option = 'H', name = 'Site') +
+  scale_y_continuous(breaks = seq(0, 1, by = 0.1), 
+                     labels = scales::percent, 
+                     limits = c(0, 1.025),
+                     name = 'Proned within 12 Hours of Enrollment') +
+  scale_x_continuous(breaks = seq(min_quarter, max_quarter, by = 1),
+                     labels = study_quarter_labels,
+                     limits = c(min_quarter - 0.1, max_quarter + 0.1),
+                     name = 'Year:Months') +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1)) +
+  geom_vline(xintercept = 9.6667, linetype = 2) +
+  annotate("text", x = 5.667, y = 1.025, label = 'Pre COVID-19') +
+  geom_vline(xintercept = 17.6667, linetype = 2) +
+  annotate("text", x = 13.667, y = 1.025, label = 'COVID-19') +
+  annotate("text", x = 21.667, y = 1.025, label = 'Post COVID-19')
+
+# Display the plot
+base_plot
+ggsave(
+  filename = 'proning_by_quarter_12_clif.pdf',
+  plot = base_plot,
+  path = paste0(project_location, '/summary_output/graphs/'),
+  width = 12,       # adjust width to make it wide
+  height = 6,       # adjust height for PowerPoint-friendly proportions
+  units = "in"      # units set to inches for precise control
+)
+
+##TWO Period Graph
+# Create the plot with reordered legend and 'Overall' in legend
+base_plot <- ggplot(prone_per_quarter[prone_per_quarter$site == 'all_sites', ],
+                    aes(x = study_quarter, y = proned_12_hr_percent)) +
+  geom_errorbar(aes(
+    ymin = proned_12_hr_percent - (1.96 * standard_error_12), 
+    ymax = proned_12_hr_percent + (1.96 * standard_error_12)), 
+    width = 0.20, color = 'darkgrey', linewidth = 1.05) +
+  geom_point() +
+  geom_line(linewidth = 1.05, aes(color = site_name)) + # Include 'Overall' in legend
+  geom_line(data = prone_per_quarter[prone_per_quarter$site != 'all_sites', ],
+            aes(x = study_quarter, y = proned_12_hr_percent, 
+                color = site_name), alpha = 0.2,
+            linewidth = 0.90) +
+  scale_color_viridis_d(option = 'H', name = 'Site') +
+  scale_y_continuous(breaks = seq(0, 1, by = 0.1), 
+                     labels = scales::percent, 
+                     limits = c(0, 1.025),
+                     name = 'Proned within 12 Hours of Enrollment') +
+  scale_x_continuous(breaks = seq(min_quarter, max_quarter, by = 1),
+                     labels = study_quarter_labels,
+                     limits = c(min_quarter - 0.1, max_quarter + 0.1),
+                     name = 'Year:Months') +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1)) +
+  geom_vline(xintercept = 9.6667, linetype = 2) +
+  annotate("text", x = 5.667, y = 1.025, label = 'Pre COVID-19') +
+  annotate("text", x = 16.667, y = 1.025, label = 'COVID-19')
+  
+
+# Display the plot
+base_plot
+ggsave(
+  filename = 'twoperiod_proning_by_quarter_12_clif.pdf',
+  plot = base_plot,
+  path = paste0(project_location, '/summary_output/graphs/'),
+  width = 12,       # adjust width to make it wide
+  height = 6,       # adjust height for PowerPoint-friendly proportions
+  units = "in"      # units set to inches for precise control
+)
+```
+
+```{r Repeat Graph but Now with Proning Within 72 Hours}
+# Create the plot with reordered legend and 'Overall' in legend
+base_plot <- ggplot(prone_per_quarter[prone_per_quarter$site == 'all_sites', ],
+                    aes(x = study_quarter, y = proned_72_hr_percent)) +
+  geom_errorbar(aes(
+    ymin = proned_72_hr_percent - (1.96 * standard_error_72), 
+    ymax = proned_72_hr_percent + (1.96 * standard_error_72)), 
+    width = 0.20, color = 'darkgrey', linewidth = 1.05) +
+  geom_point() +
+  geom_line(linewidth = 1.05, aes(color = site_name)) + # Include 'Overall' in legend
+  geom_line(data = prone_per_quarter[prone_per_quarter$site != 'all_sites', ],
+            aes(x = study_quarter, y = proned_72_hr_percent, 
+                color = site_name), alpha = 0.2,
+            linewidth = 0.90) +
+  scale_color_viridis_d(option = 'H', name = 'Site') +
+  scale_y_continuous(breaks = seq(0, 1, by = 0.1), 
+                     labels = scales::percent, 
+                     limits = c(0, 1.025),
+                     name = 'Proned within 72 Hours of Enrollment') +
+  scale_x_continuous(breaks = seq(min_quarter, max_quarter, by = 1),
+                     labels = study_quarter_labels,
+                     limits = c(min_quarter - 0.1, max_quarter + 0.1),
+                     name = 'Year:Months') +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1)) +
+  geom_vline(xintercept = 9.6667, linetype = 2) +
+  annotate("text", x = 5.667, y = 1.025, label = 'Pre COVID-19') +
+  geom_vline(xintercept = 17.6667, linetype = 2) +
+  annotate("text", x = 13.667, y = 1.025, label = 'COVID-19') +
+  annotate("text", x = 21.667, y = 1.025, label = 'Post COVID-19')
+
+# Display the plot
+base_plot
+ggsave(
+  filename = 'proning_by_quarter_72_clif.pdf',
+  plot = base_plot,
+  path = paste0(project_location, '/summary_output/graphs/'),
+  width = 12,       # adjust width to make it wide
+  height = 6,       # adjust height for PowerPoint-friendly proportions
+  units = "in"      # units set to inches for precise control
+)
+
+##TWO PERIOD GRAPH
+base_plot <- ggplot(prone_per_quarter[prone_per_quarter$site == 'all_sites', ],
+                    aes(x = study_quarter, y = proned_72_hr_percent)) +
+  geom_errorbar(aes(
+    ymin = proned_72_hr_percent - (1.96 * standard_error_72), 
+    ymax = proned_72_hr_percent + (1.96 * standard_error_72)), 
+    width = 0.20, color = 'darkgrey', linewidth = 1.05) +
+  geom_point() +
+  geom_line(linewidth = 1.05, aes(color = site_name)) + # Include 'Overall' in legend
+  geom_line(data = prone_per_quarter[prone_per_quarter$site != 'all_sites', ],
+            aes(x = study_quarter, y = proned_72_hr_percent, 
+                color = site_name), alpha = 0.2,
+            linewidth = 0.90) +
+  scale_color_viridis_d(option = 'H', name = 'Site') +
+  scale_y_continuous(breaks = seq(0, 1, by = 0.1), 
+                     labels = scales::percent, 
+                     limits = c(0, 1.025),
+                     name = 'Proned within 72 Hours of Enrollment') +
+  scale_x_continuous(breaks = seq(min_quarter, max_quarter, by = 1),
+                     labels = study_quarter_labels,
+                     limits = c(min_quarter - 0.1, max_quarter + 0.1),
+                     name = 'Year:Months') +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1)) +
+  geom_vline(xintercept = 9.6667, linetype = 2) +
+  annotate("text", x = 5.667, y = 1.025, label = 'Pre COVID-19') +
+  annotate("text", x = 16.667, y = 1.025, label = 'COVID-19')
+
+# Display the plot
+base_plot
+ggsave(
+  filename = 'twoperiod_proning_by_quarter_72_clif.pdf',
+  plot = base_plot,
+  path = paste0(project_location, '/summary_output/graphs/'),
+  width = 12,       # adjust width to make it wide
+  height = 6,       # adjust height for PowerPoint-friendly proportions
+  units = "in"      # units set to inches for precise control
+)
+```
+```{r Proning 12 Hours by Quarter - No Data Indicating Which Health Systems are Which}
+# Separate "all_sites" and individual sites data for clarity
+overall_data <- prone_per_quarter[prone_per_quarter$site == 'all_sites', ]
+site_data <- prone_per_quarter[prone_per_quarter$site != 'all_sites', ]
+# Dynamically create the label with sample size for the "Overall" line
+overall_label <- paste("Overall Trend (n =", overall_data$sample_size[1], ")")
+# Base plot
+base_plot <- ggplot(overall_data, aes(x = study_quarter, y = proned_12_hr_percent)) +
+  # Error bars for "all_sites" data
+  geom_errorbar(
+    aes(ymin = proned_12_hr_percent - (1.96 * standard_error_12), 
+        ymax = proned_12_hr_percent + (1.96 * standard_error_12)), 
+    width = 0.20, color = 'darkgrey', linewidth = 1.05
+  ) +
+  # Points for "all_sites" data
+  geom_point() +
+  # Main "Overall" line with dynamic label for sample size, converting label to factor
+  geom_line(aes(linetype = factor(overall_label)), color = 'black', linewidth = 1.2) +
+  # Define linetype legend with dynamic label
+  scale_linetype_manual(values = setNames("solid", overall_label), name = "") +
+  # Site-specific lines with color gradient based on sample size
+  geom_line(data = site_data,
+            aes(x = study_quarter, y = proned_12_hr_percent, color = sample_size, group = site),
+            linewidth = 0.4, alpha = 0.4) +
+  # Scale for color gradient to reflect sample size with a smaller title font size
+  scale_color_gradient(
+    low = "lightblue", high = "darkblue", 
+    name = "Individual Health Systems\n(Line Color Represents\nNumber of Patients)"
+  ) +
+  # Reorder legend to display linetype legend above color gradient legend
+  guides(
+    linetype = guide_legend(order = 1),
+    color = guide_colorbar(order = 2, title.theme = element_text(size = 9))  # Smaller font for color bar title
+  ) +
+  # Adjust legend font sizes in theme
+  theme(
+    legend.text = element_text(size = 14),   # Increase font size for linetype legend text
+    legend.title = element_text(size = 14),  # Increase font size for linetype legend title
+    legend.title.align = 0,  # Aligns legend title to left for clarity
+  ) +
+  # Y-axis for proning percentage and X-axis for study quarter with custom labels and limits
+  scale_y_continuous(breaks = seq(0, 1, by = 0.1), 
+                     labels = scales::percent, 
+                     limits = c(0, 1.025),
+                     name = 'Proned within 12 Hours of Enrollment') +
+  scale_x_continuous(breaks = seq(min_quarter, max_quarter, by = 1),
+                     labels = study_quarter_labels,
+                     limits = c(min_quarter - 0.1, max_quarter + 0.1),
+                     name = 'Year:Months') +
+  # Add COVID-19 period separator with labels
+  geom_vline(xintercept = 9.6667, linetype = 2) +
+  annotate("text", x = 5.667, y = 1.025, label = 'Pre COVID-19') +
+  annotate("text", x = 16.667, y = 1.025, label = 'COVID-19') +
+  # Classic theme and rotated x-axis labels for readability
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1))
+# Display the plot
+base_plot
+
+ggsave(
+  filename = 'twoperiod_proning_by_quarter_12_anonymous_clif.pdf',
+  plot = base_plot,
+  path = paste0(project_location, '/summary_output/graphs/'),
+  width = 12,       # adjust width to make it wide
+  height = 6,       # adjust height for PowerPoint-friendly proportions
+  units = "in"      # units set to inches for precise control
+)
+
+# Separate "all_sites" and individual sites data for clarity
+overall_data <- prone_per_quarter[prone_per_quarter$site == 'all_sites', ]
+site_data <- prone_per_quarter[prone_per_quarter$site != 'all_sites', ]
+# Dynamically create the label with sample size for the "Overall" line
+overall_label <- paste("Overall Trend (n =", overall_data$sample_size[1], ")")
+# Base plot
+base_plot <- ggplot(overall_data, aes(x = study_quarter, y = proned_12_hr_percent)) +
+  # Error bars for "all_sites" data
+  geom_errorbar(
+    aes(ymin = proned_12_hr_percent - (1.96 * standard_error_12), 
+        ymax = proned_12_hr_percent + (1.96 * standard_error_12)), 
+    width = 0.20, color = 'darkgrey', linewidth = 1.05
+  ) +
+  # Points for "all_sites" data
+  geom_point() +
+  # Main "Overall" line with dynamic label for sample size, converting label to factor
+  geom_line(aes(linetype = factor(overall_label)), color = 'black', linewidth = 1.2) +
+  # Define linetype legend with dynamic label
+  scale_linetype_manual(values = setNames("solid", overall_label), name = "") +
+  # Site-specific lines with color gradient based on sample size
+  geom_line(data = site_data,
+            aes(x = study_quarter, y = proned_12_hr_percent, color = sample_size, group = site),
+            linewidth = 0.4, alpha = 0.4) +
+  # Scale for color gradient to reflect sample size with a smaller title font size
+  scale_color_gradient(
+    low = "lightblue", high = "darkblue", 
+    name = "Individual Health Systems\n(Line Color Represents\nNumber of Patients)"
+  ) +
+  # Reorder legend to display linetype legend above color gradient legend
+  guides(
+    linetype = guide_legend(order = 1),
+    color = guide_colorbar(order = 2, title.theme = element_text(size = 9))  # Smaller font for color bar title
+  ) +
+  # Adjust legend font sizes in theme
+  theme(
+    legend.text = element_text(size = 14),   # Increase font size for linetype legend text
+    legend.title = element_text(size = 14),  # Increase font size for linetype legend title
+    legend.title.align = 0,  # Aligns legend title to left for clarity
+  ) +
+  # Y-axis for proning percentage and X-axis for study quarter with custom labels and limits
+  scale_y_continuous(breaks = seq(0, 1, by = 0.1), 
+                     labels = scales::percent, 
+                     limits = c(0, 1.025),
+                     name = 'Proned within 12 Hours of Enrollment') +
+  scale_x_continuous(breaks = seq(min_quarter, max_quarter, by = 1),
+                     labels = study_quarter_labels,
+                     limits = c(min_quarter - 0.1, max_quarter + 0.1),
+                     name = 'Year:Months') +
+  # Add COVID-19 period separator with labels
+  geom_vline(xintercept = 9.6667, linetype = 2) +
+  annotate("text", x = 5.667, y = 1.025, label = 'Pre COVID-19') +
+  geom_vline(xintercept = 17.6667, linetype = 2) +
+  annotate("text", x = 13.667, y = 1.025, label = 'COVID-19') +
+  annotate("text", x = 21.667, y = 1.025, label = 'Post COVID-19') +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1))
+# Display the plot
+base_plot
+
+ggsave(
+  filename = 'proning_by_quarter_12_anonymous_clif.pdf',
+  plot = base_plot,
+  path = paste0(project_location, '/summary_output/graphs/'),
+  width = 12,       # adjust width to make it wide
+  height = 6,       # adjust height for PowerPoint-friendly proportions
+  units = "in"      # units set to inches for precise control
+)
+```
+
+```{r Create Time Series Plot by COVID Status}
+prone_per_quarter_covid <- prone_per_quarter_covid |>
+  group_by(site) |>
+  mutate(sample_size = sum(n_patients)) |>
+  ungroup() 
+
+all_site <- prone_per_quarter_covid[prone_per_quarter_covid$site == 'all_sites', ] |>
+  mutate(study_quarter=fifelse(
+    sars_cov2_positive=='COVID', study_quarter+0.02, study_quarter
+  )) |>
+  mutate(ymin = proned_12_hr_percent - (1.96 * standard_error_12), 
+         ymax = proned_12_hr_percent + (1.96 * standard_error_12),
+         ymin = fifelse(ymin<0, 0, ymin),
+         ymax = fifelse(ymax>1.0, 1, ymax),
+         sars_cov2_positive=fifelse(sars_cov2_positive=='Not COVID', 'No/Unknown/Pre-COVID', 'Positive'))
+
+base_plot <- ggplot(all_site, aes(x=study_quarter, y=proned_12_hr_percent)) +
+  #Error bars for "all_sites" data by COVID Status
+  geom_linerange(aes(x=study_quarter, ymin = ymin, 
+                    ymax = ymax, color = sars_cov2_positive), 
+                width = 0.20, linewidth = 1.05, alpha=0.5) +
+  geom_point(aes(color= sars_cov2_positive)) +
+  geom_line(aes(group=sars_cov2_positive, color=sars_cov2_positive)) +
+  # Adjust legend font sizes in theme
+  theme(
+    legend.text = element_text(size = 14),   # Increase font size for linetype legend text
+    legend.title = element_text(size = 14),  # Increase font size for linetype legend title
+    legend.title.align = 0,  # Aligns legend title to left for clarity
+  ) +
+  # Y-axis for proning percentage and X-axis for study quarter with custom labels and limits
+  scale_y_continuous(breaks = seq(0, 1, by = 0.1), 
+                     labels = scales::percent, 
+                     limits = c(0, 1.025),
+                     name = 'Proned within 12 Hours of Enrollment') +
+  scale_x_continuous(breaks = seq(min_quarter, max_quarter, by = 1),
+                     labels = study_quarter_labels,
+                     limits = c(min_quarter - 0.1, max_quarter + 0.1),
+                     name = 'Year:Months') +
+  # Add COVID-19 period separator with labels
+  geom_vline(xintercept = 9.125, linetype = 2) +
+  annotate("text", x = 5.0, y = 1.025, label = 'Pre COVID-19') +
+  geom_vline(xintercept = 17.6667, linetype = 2) +
+  annotate("text", x = 13.667, y = 1.025, label = 'COVID-19') +
+  annotate("text", x = 22.667, y = 1.025, label = 'Post COVID-19') +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1)) +
+  scale_color_met_d('Isfahan1', direction =-1) +
+  guides(color = guide_legend(title = 'SARS-CoV2 Status'))
+base_plot
+
+ggsave(
+  filename = 'proning_by_quarter_12_covid_status.pdf',
+  plot = base_plot,
+  path = paste0(project_location, '/summary_output/graphs/'),
+  width = 12,       # adjust width to make it wide
+  height = 6,       # adjust height for PowerPoint-friendly proportions
+  units = "in"      # units set to inches for precise control
+)
+
+```
+```{r Period and SARS-Cov2 Figure With Post COVID SARS Pos in Quarters Given Sparse Data}
+prone_summary_custom <- collate_tables("_prone_per_quarter-sarscoV2_status")  
+
+#Collate the Non-Sars COV2 POST COVID Separately and do in 6 month periods
+not_post_sars <- prone_summary_custom |>
+  filter(!(study_period=='Post-COVID' & sars_cov2_positive=='COVID')) |>
+  select(-study_period)
+post_sars_pos <- prone_summary_custom |>
+  filter(study_period=='Post-COVID' & sars_cov2_positive=='COVID') |>
+  select(-study_period)
+
+#Create Overall N by Quarter As Well As N-proned and the like 
+temp_pre_post_neg <- not_post_sars |>
+  group_by(study_quarter, sars_cov2_positive) |>
+  summarise(
+    n_patients = sum(n_patients, na.rm = TRUE),
+    n_proned_12_hr = sum(n_proned_12_hr, na.rm = TRUE),
+    proned_12_hr_percent = n_proned_12_hr/n_patients,
+    standard_error_12 = sqrt(proned_12_hr_percent * (1 - proned_12_hr_percent) / n_patients),
+    n_proned_24_hr = sum(n_proned_24_hr, na.rm = TRUE),
+    proned_24_hr_percent = n_proned_24_hr/n_patients,
+    standard_error_24 = sqrt(proned_24_hr_percent * (1 - proned_24_hr_percent) / n_patients),
+    n_proned_72_hr = sum(n_proned_72_hr, na.rm = TRUE),
+    proned_72_hr_percent = n_proned_72_hr/n_patients,
+    standard_error_72 = sqrt(proned_72_hr_percent * (1 - proned_72_hr_percent) / n_patients),
+    n_proned_all = sum(n_proned_all, na.rm = TRUE),
+    proned_percent_all = n_proned_all/n_patients,
+    standard_error_all = sqrt(proned_percent_all * (1 - proned_percent_all) / n_patients),
+  ) |>
+  ungroup() |>
+  mutate(site='all_sites')
+
+#Create Overall N by 6-month Period For POST-COVID SARS POS As Well As N-proned and the like 
+post_sars_pos <- post_sars_pos |>
+  mutate(study_quarter=ifelse(study_quarter %% 2 == 0, study_quarter, study_quarter-1)) |>
+  group_by(study_quarter, sars_cov2_positive) |>
+  summarise(
+    n_patients = sum(n_patients, na.rm = TRUE),
+    n_proned_12_hr = sum(n_proned_12_hr, na.rm = TRUE),
+    proned_12_hr_percent = n_proned_12_hr/n_patients,
+    standard_error_12 = sqrt(proned_12_hr_percent * (1 - proned_12_hr_percent) / n_patients),
+    n_proned_24_hr = sum(n_proned_24_hr, na.rm = TRUE),
+    proned_24_hr_percent = n_proned_24_hr/n_patients,
+    standard_error_24 = sqrt(proned_24_hr_percent * (1 - proned_24_hr_percent) / n_patients),
+    n_proned_72_hr = sum(n_proned_72_hr, na.rm = TRUE),
+    proned_72_hr_percent = n_proned_72_hr/n_patients,
+    standard_error_72 = sqrt(proned_72_hr_percent * (1 - proned_72_hr_percent) / n_patients),
+    n_proned_all = sum(n_proned_all, na.rm = TRUE),
+    proned_percent_all = n_proned_all/n_patients,
+    standard_error_all = sqrt(proned_percent_all * (1 - proned_percent_all) / n_patients),
+  ) |>
+  ungroup() |>
+  mutate(site='all_sites')
+
+#Now Bind Together
+prone_per_quarter_custom <- rbind(temp_pre_post_neg, post_sars_pos)
+
+#Now Prepare Data Farme for ggplot
+all_site <- prone_per_quarter_custom[prone_per_quarter_custom$site == 'all_sites', ] |>
+  mutate(ymin = proned_12_hr_percent - (1.96 * standard_error_12), 
+         ymax = proned_12_hr_percent + (1.96 * standard_error_12),
+         ymin = fifelse(ymin<0, 0, ymin),
+         ymax = fifelse(ymax>1.0, 1, ymax),
+         sars_cov2_positive=fifelse(sars_cov2_positive=='Not COVID', 'No/Unknown/Pre-COVID', 'SARS-CoV2 Positive'))
+
+all_site$sars_cov2_positive <- factor(all_site$sars_cov2_positive, 
+                                     levels = c("SARS-CoV2 Positive", "No/Unknown/Pre-COVID"))  # Put desired order here
+
+base_plot <- ggplot(all_site, aes(x=study_quarter, y=proned_12_hr_percent)) +
+  #Error bars for "all_sites" data by COVID Status
+  geom_linerange(aes(x=study_quarter, ymin = ymin, 
+                    ymax = ymax, color = sars_cov2_positive), 
+                width = 0.20, linewidth = 1.05, alpha=0.5) +
+  geom_point(aes(color= sars_cov2_positive)) +
+  geom_line(aes(group=sars_cov2_positive, color=sars_cov2_positive)) +
+  # Adjust legend font sizes in theme
+  theme(
+    legend.text = element_text(size = 14),   # Increase font size for linetype legend text
+    legend.title = element_text(size = 14),  # Increase font size for linetype legend title
+    legend.title.align = 0,  # Aligns legend title to left for clarity
+  ) +
+  # Y-axis for proning percentage and X-axis for study quarter with custom labels and limits
+  scale_y_continuous(breaks = seq(0, 1, by = 0.1), 
+                     labels = scales::percent, 
+                     limits = c(0, 1.025),
+                     name = 'Proned within 12 Hours of Enrollment') +
+  scale_x_continuous(breaks = seq(min_quarter, max_quarter, by = 1),
+                     labels = study_quarter_labels,
+                     limits = c(min_quarter - 0.1, max_quarter + 0.1),
+                     name = 'Year:Months') +
+  # Add COVID-19 period separator with labels
+  geom_vline(xintercept = 9.125, linetype = 2) +
+  annotate("text", x = 5.0, y = 1.025, label = 'Pre COVID-19') +
+  geom_vline(xintercept = 17.6667, linetype = 2) +
+  annotate("text", x = 13.667, y = 1.025, label = 'COVID-19') +
+  annotate("text", x = 22.667, y = 1.025, label = 'Post COVID-19') +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1),
+        legend.position = c(0.155, 0.75),
+        legend.text = element_text(size = 8),  # Smaller legend text
+        legend.key.size = unit(0.9, "lines"),  # Smaller legend keys
+        legend.spacing.y = unit(0.2, "cm")) +   # Less spacing between legend items) 
+  scale_color_met_d('Isfahan1', direction =-1) +
+  guides(color = guide_legend(title = ''))
+  base_plot
+  
+  ggsave(
+  filename = 'proning_by_quarter_12_covid_status_6month_post.pdf',
+  plot = base_plot,
+  path = paste0(project_location, '/summary_output/graphs/'),
+  width = 12,       # adjust width to make it wide
+  height = 6,       # adjust height for PowerPoint-friendly proportions
+  units = "in"      # units set to inches for precise control
+)
+```
+
+
+```{r Summary for Aggregate Counts and Proning Pre and Post COVID}
+#Will have to Use both Aggregate Table and STudy Quarter Table to Come To Accurate Counts
+#Collate Aggregate
+aggregate_data <- collate_tables('_aggregate_expected_prone')
+write.csv(aggregate_data, paste0(project_location, '/summary_output/aggregate_data.csv'))
+
+#Aggregate Data with COVID
+agg_w_covid <- collate_tables('_aggregate_expected_prone_wCOVID-Status')
+write.csv(agg_w_covid, paste0(project_location, '/summary_output/aggregate_data_wcovid.csv'))
+
+prone_summary_all <- collate_tables('_prone_per_period') |>
+  group_by(study_period) |>
+  summarise(
+      n_hospitals = sum(n_hospitals, na.rm=T),
+      n_patients = sum(n_patients, na.rm = TRUE),
+      across(
+        starts_with("n_proned_"),
+        ~ sum(.x, na.rm = TRUE),
+        .names = "{.col}"
+      )
+    ) |>
+      mutate(
+        across(
+          starts_with("n_proned"),
+          ~ round(.x / n_patients * 100, 1),
+          .names = "{.col}_percent"
+        ),
+        across(
+        ends_with("percent"),
+         ~ sqrt((.x / 100) * (1 - (.x / 100)) / n_patients),
+        .names = "standard_error_{.col}"
+       ),
+        site='all_sites'
+      )
+
+#Rename
+prone_summary_all <- prone_summary_all |>
+  # Rename standard error columns
+  rename_with(
+    .cols = starts_with("standard_error_n"),
+    .fn = ~ gsub("standard_error_n_proned_([0-9]+)_hr_percent", 
+                  "standard_error_\\1", .x)
+  ) |>
+  # Rename percent columns
+  rename_with(
+    .cols = matches("^n_proned_[0-9]+_hr_percent$"),
+    .fn = ~ gsub("n_proned_", "proned_", .x)
+  ) |>
+  rename(
+   proned_percent_all =  n_proned_all_percent,
+   standard_error_all = standard_error_n_proned_all_percent
+  )
+prone_summary <- collate_tables('_prone_per_period') |>
+  rbind(prone_summary_all)
+write_csv(prone_summary, paste0(project_location, '/summary_output/prone_summary_clif.csv'))
+```
+
+```{r Bar Chart of Admits and COVID Status Over Time}
+base_plot <- ggplot(subset(prone_per_quarter_covid, site =='all_sites'), 
+                    aes(x=study_quarter, y=n_patients, fill = factor(sars_cov2_positive))) +
+  geom_col() +
+   scale_fill_manual(
+    values = c("Not COVID" = "#40005C", "COVID" = "#FF8B10"),
+    labels = c("Not COVID" = "COVID Negative/Unknown or \n  Pre-COVID", 
+               "COVID" = "SARS-CoV2 Positive"),
+    name = ""
+  ) +
+  scale_y_continuous(name = 'Number of Admissions',
+                     limits = c(0, 510)) +
+  scale_x_continuous(breaks = seq(min_quarter, max_quarter, by = 1),
+                     labels = study_quarter_labels,
+                     #limits = c(0, max_quarter + 0.1),
+                     name = 'Year:Months') +
+  # Add COVID-19 period separator with labels
+  geom_vline(xintercept = 8.60, linetype = 2) +
+  annotate("text", x = 5.0, y = 505, label = 'Pre COVID-19', size=3.3) +
+  geom_vline(xintercept = 17.5, linetype = 2) +
+  annotate("text", x = 14.0, y = 505, label = 'COVID-19', size=3.3) +
+  annotate("text", x = 21.667, y = 505, label = 'Post COVID-19', size=3.3) +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1, size=0.60),
+     legend.position = c(0.155, 0.75),
+        legend.text = element_text(size = 8),  # Smaller legend text
+        legend.key.size = unit(0.9, "lines"),  # Smaller legend keys
+        legend.spacing.y = unit(0.2, "cm"))    # Less spacing between legend items
+
+# Display the plot
+base_plot
+
+ggsave(
+  filename = 'admits_over_time.pdf',
+  plot = base_plot,
+  path = paste0(project_location, '/summary_output/graphs/'),
+  width = 12,       # adjust width to make it wide
+  height = 6,       # adjust height for PowerPoint-friendly proportions
+  units = "in"      # units set to inches for precise control
+)
+```
+
+
+```{r Collate Table 1}
+# Function to extract and collate specified tables from the site_table_data list
+#This Will Only Work with Tables with the Same Number of Columns
+# Function to extract and collate specified tables from the site_table_data list
+collate_table_one <- function(table_suffix) {
+  # Extract only data frames that match the pattern "[SITE]_table_suffix"
+  table_list <- lapply(sites, function(site) {
+    # Construct the key to extract the correct data frame
+    table_name <- paste(site, table_suffix, sep = "")
+    
+    if (table_name %in% names(site_table_data)) {
+      # Retrieve the data frame and add the 'site' column
+      df <- site_table_data[[table_name]]
+      colnames(df) <- as.character(unlist(df[1, ]))
+      df <- df |>
+        filter(row_number()>1)
+      df <- df |> select(characteristic, site, Overall, percent_missing)  # Select necessary columns
+      return(df)
+    } else {
+      message(paste("Table not found for site:", site))
+      return(NULL)  # Return NULL if the table isn't found
+    }
+  })
+  
+  # Filter out NULL elements (sites that didn't have the table)
+  table_list <- Filter(Negate(is.null), table_list)
+  
+  # Combine all data frames into one using rbind
+  combined_table <- do.call(rbind, table_list)
+  
+  return(combined_table)
+}
+
+#Function to Clean Characteristic Colum
+clean_characteristic <- function(x) {
+  x %>% 
+    str_trim() %>%              # remove leading/trailing spaces
+    str_remove("^X\\.+")        # remove X followed by one-or-more dots
+}
+
+# Run the function
+tableone_master <- collate_table_one("_Table1_by_Hospital") |>
+   mutate(characteristic = clean_characteristic(characteristic))
+
+#Remove All Variables Between Hospital and Year
+# Function to remove elements between 'hospital_id....' and next 'year....'
+vars <- tableone_master$characteristic 
+remove_between_hospital_year <- function(x) {
+  start_idx <- which(grepl("hospital_id", x))
+  end_idx <- which(grepl("year", x))
+  
+  # Create vector of indices to remove
+  to_remove <- c()
+  for (s in start_idx) {
+    e <- end_idx[end_idx >= s][1]
+    if (!is.na(e)) {
+      to_remove <- c(to_remove, s:e)
+    }
+  }
+  return(x[-to_remove])
+}
+
+# Apply function
+clean_vars <- remove_between_hospital_year(vars)
+
+##Filter Table ONe Master to These Clean Variable Lists
+tableone_master <- tableone_master |>
+  filter(characteristic %in% clean_vars)
+
+#FOr Sites with Only Two STudy Periods Need to Correct Period Numbers for Summation
+new_data <- data.frame(
+  characteristic = rep('COVID', 3),
+  site = c('OHSU', 'RUSH', 'Sunnybrook'),
+  Overall = c('78 (59.5)', '165 (74.0)', '50 (40.3)'),
+  percent_missing = rep("", 3)
+)
+
+tableone_master <- rbind(tableone_master, new_data) |>
+  mutate(characteristic=fifelse(
+    site=='Sunnybrook' & characteristic =='race_ethnicity = unknown (%)', 'unknown', characteristic)
+  )
+```
+
+```{r Table 1 Wide - Second}
+#These are Cleaner Labels for the 'Characteristics' Variable
+unique_vars <- unique(clean_vars)
+unique_vars
+
+wide_table_scaffold <- c(
+    "n",
+    "age_at_admission (mean (SD))",
+    "female",
+    "Race_ethnicity",
+    "Asian",
+    "Black, non-Hispanic",
+    "Hispanic",
+    "other_race",
+    "unknown_race",
+    "White, non-Hispanic",
+    "bmi (mean (SD))",
+    "2018",
+    "2019",
+    "2020",
+    "2021",
+    "2022",
+    "2023",
+    "2024",
+    "Study Period",
+    "COVID",
+    "Post_COVID",
+    "Pre_COVID",
+    "Period and SARS-CoV2",
+    "COVIDPeriod_SARCoV2Neg.Unk",
+    "COVID_SarsCov2Pos",
+    "Post_COVID_SarsCov2Neg.Unk",
+    "Post_COVID_SarsCov2Pos",
+    "Pre_COVID_Testing",
+    "eligible_by_proseva",
+    "eligible_by_prone",
+    "admit_to_enrolled (mean (SD)",
+    "ett_to_enrolled (mean (SD))",
+    "or_before_enrollment",
+    "min_pf_ratio (mean (SD))",
+    "severe_ards",
+    "first_vent_mode",
+    "AssistControl-VolumeControl",
+    "Other_Vent_Mode",
+    "Pressure_Control",
+    "Pressure_Support/CPAP",
+    "Pressure-Regulated-Volume-Control",
+    "SIMV",
+    "first_proseva_peep (mean (SD))",
+    "first_proseva_fio2 (mean (SD))",
+    "sofa_score (mean (SD))",
+    "Norepi Equivalent",
+    "No Norepi",
+    "LessThan0.01",
+    "MoreThan0.10",
+    "age_at_admission (mean (SD))",
+    "female",
+    "Race_ethnicity",
+    "Black, non-Hispanic",
+    "White, non-Hispanic",
+    "bmi (mean (SD))",
+    "Post_COVID",
+    "Period and SARS-CoV2",
+    "COVIDPeriod_SARCoV2Neg.Unk",
+    "Post_COVID_SarsCov2Neg.Unk",
+    "Post_COVID_SarsCov2Pos",
+    "eligible_by_proseva",
+    "eligible_by_prone",
+    "admit_to_enrolled (mean (SD)",
+    "ett_to_enrolled (mean (SD))",
+    "or_before_enrollment",
+    "min_pf_ratio (mean (SD))",
+    "severe_ards",
+    "first_vent_mode",
+    "AssistControl-VolumeControl",
+    "Pressure_Control",
+    "Pressure_Support/CPAP",
+    "Pressure-Regulated-Volume-Control",
+    "first_proseva_peep (mean (SD))",
+    "first_proseva_fio2 (mean (SD))",
+    "sofa_score (mean (SD))",
+    "Norepi Equivalent",
+    "APRV",
+    "unknown_race",
+    #"Year",
+    "Pre_COVID",
+    "Pre_COVID_Testing",
+    "Pressure_Control",
+    "Other_Vent_Mode"
+    )
+
+# Create lookup vector
+label_lookup <- setNames(wide_table_scaffold, unique_vars)
+
+# Now map labels to all of clean_vars
+mapped_labels <- label_lookup[clean_vars]
+
+# Result
+mapped_labels
+tableone_master$characteristic <- mapped_labels[tableone_master$characteristic]
+```
+```{r Work Towards an Overall Table}
+table1_work <- tableone_master |>
+  rename(site_data=Overall) |>
+  # Extract mean and SD using regex
+  mutate(site_data=trimws(site_data),
+         site_mean_count=as.numeric(sub("\\s*\\(.*", "", site_data)), # Gets the mean/count
+         site_sd_perc=as.numeric(sub(".*\\((.*)\\).*", "\\1", site_data))) |>
+  #Define a Column is a Mean or SD Column
+  mutate(mean_col=fifelse(
+            grepl('mean', characteristic, ignore.case=T), 1, 0))|>
+  group_by(characteristic, mean_col) |>
+  mutate(count=fifelse(
+         mean_col==0, sum(site_mean_count, na.rm=T), NaN)
+  ) |>
+  #Calculate Proportion Each Site Contributes (for Weighted Averages)
+  group_by(site) |>
+  mutate(site_n=fifelse(characteristic=='n', site_mean_count, NaN),
+         site_n=sum(site_n, na.rm=T),
+         #Account for Missingness
+         percent_missing=as.numeric(percent_missing),
+         percent_missing=fifelse(is.na(percent_missing), 0, percent_missing),
+         value_n = round((1 - percent_missing /100) * site_n, 0), site_n) |>
+  ungroup() |>
+  group_by(characteristic) |>
+  mutate(overall_n=sum(value_n, na.rm = TRUE),
+        weights = value_n / overall_n,
+        percent = fifelse(mean_col==0, round((count/overall_n)*100, 2), NaN)) |>
+   ungroup() |>
+  #Calculate Weighted Means - Checked and This Matches HMisc Function (wtd.mean)
+  group_by(characteristic) |>
+  mutate(weighted_mean=fifelse(
+    mean_col==1, round(sum(site_mean_count*weights, na.rm=T), 3), NaN)) |>
+  mutate(
+  pooled_sd = fifelse(
+    mean_col == 1,
+    round(sqrt(sum((value_n - 1) * site_sd_perc^2, na.rm = T) / 
+                 sum(value_n - 1, na.rm = T)), 2), NaN)) |>
+  ungroup()
+
+table1 <- table1_work |>
+  filter(site=='Hopkins') |>
+  mutate(site='Overall')
+```
+
+```{r P Values For Between Site Comparisons Using Weighted ANOVA/Chi2 -2}
+#Identify Columns For Weighted ANOVA (continuous Vars)
+mean_cols <- table1$characteristic[table1$mean_col==1]
+
+#Function for Weighted ANOVA from Summary Data
+#
+weighted_anova_pval <- function(df, cols) {
+  df <- df |>
+    group_by(characteristic) |>
+    filter(characteristic %in% cols) |>
+  # Total number of groups
+    mutate(k=length(site_mean_count)) |>
+    #Between-group sum of squares (SSB)
+    mutate(ss_between=sum(value_n * ((site_mean_count-weighted_mean)^2), na.rm=T),
+           ss_within=sum((value_n - 1) * (site_sd_perc^2), na.rm=T),
+           # Degrees of freedom
+           df_between = k-1,
+           df_within = overall_n-k, 
+           # Mean squares
+           ms_between = ss_between/df_between,
+           ms_within = ss_within/df_within,
+           f_stat = round(ms_between/ms_within, 4),
+           p_value = round(pf(f_stat, df_between, df_within, lower.tail = FALSE), 4))
+  
+  new_columns <- df |>
+    select(characteristic, f_stat, p_value) |>
+    filter(row_number()==1) |>
+    ungroup()
+  return(new_columns)
+}
+group_p_values <- weighted_anova_pval(table1_work, mean_cols)
+
+#Now for Catgorical Weighted Chi 2
+#Have to Do Separately for Single and Multi Category Variables
+single_cat_cols <- table1$characteristic[table1$mean_col==0 &
+                                         table1$characteristic %in% c('female',
+                                      'eligible_by_proseva',
+                                      'eligible_by_prone',
+                                      'severe_ards')]
+
+weighted_chisq <- function(df, cols, add_to) {
+  #Filter to Categorical Columns
+  df_chi <- df |>
+    filter(characteristic %in% cols) |>
+    group_by(characteristic) |>
+    mutate(expected = (percent / 100) * site_n) |>
+    summarise(
+      chisq = sum(weights * (site_mean_count - expected)^2 / expected, na.rm = TRUE),
+      dfree = n() - 1,
+      p_value = round(pchisq(chisq, df = dfree, lower.tail = FALSE), 4),
+      .groups = "drop"
+  )
+  
+  df_chi <- df_chi |>
+    select(characteristic, chisq, p_value)
+  
+  add_to <- full_join(add_to, df_chi)
+  return(add_to)
+}
+group_p_values <- weighted_chisq(table1_work, single_cat_cols, group_p_values)
+
+#Have to Take a Different Approach to MultiVariable Categories
+weighted_chisq_multicat <- function(df, cat_var, parent_name, add_to) {
+  ## Step 1: Filter to Categories Within Parent Cateogry
+  sub_df <- df %>%
+  filter(characteristic %in% cat_var) %>%
+  #Calculate Expected
+  mutate(expected = (percent / 100) * site_n)
+
+chisq <- sum(sub_df$weights * (sub_df$site_mean_count - sub_df$expected)^2 / sub_df$expected, na.rm = TRUE)
+n_categories <- length(unique(sub_df$characteristic))
+n_sites <- length(unique(sub_df$site))
+dfree <- (n_categories - 1) * (n_sites - 1)
+
+dfree <- length(unique(sub_df$characteristic)) * (n_sites - 1)  # or just (n_categories - 1) * (n_sites - 1)
+
+final_df <- data.frame(
+  characteristic = parent_name,
+  chisq = round(chisq, 4),
+  p_value = round(pchisq(chisq, df = dfree, lower.tail = FALSE), 4)
+)
+
+add_to <- full_join(add_to, final_df)
+  return(add_to)
+}
+#Now for Race/Ethnicity Categories
+race_cat <- c('Asian', 'Black, non-Hispanic', 'Hispanic', 'other_race', 'unknown_race', 'White, non-Hispanic')
+group_p_values <- weighted_chisq_multicat(table1_work, race_cat, parent_name='Race_ethnicity', group_p_values)
+#Now for Year
+years <- c('2018', '2019', '2020', '2021', '2022', '2023', '2024')
+group_p_values <- weighted_chisq_multicat(table1_work, years, parent_name='2018', group_p_values)
+study_period <- c('Pre_COVID', 'COVID', 'Post_COVID')
+group_p_values <- weighted_chisq_multicat(table1_work, study_period, parent_name='Study Period', group_p_values)
+sars_period <- c('COVIDPeriod_SARCoV2Neg.Unk', 
+                 'COVID_SarsCov2Pos', 
+                 'Post_COVID_SarsCov2Neg.Unk', 
+                 'Post_COVID_SarsCov2Pos')
+group_p_values <- weighted_chisq_multicat(table1_work, sars_period, parent_name='Period and SARS-CoV2', group_p_values)
+
+vent_mode <- c('AssistControl-VolumeControl', 'Other_Vent_Mode', 'Pressure_Control',
+               'Pressure_Support/CPAP', 'Pressure-Regulated-Volume-Control', 'SIMV')
+group_p_values <- weighted_chisq_multicat(table1_work, vent_mode, parent_name='first_vent_mode', group_p_values)
+
+norepi <- c('No Norepi', 'LessThan0.01', 'MoreThan0.10')
+group_p_values <- weighted_chisq_multicat(table1_work, norepi, parent_name='Norepi Equivalent', group_p_values)
+```
+
+```{r Put Table One Together -2}
+table1_collated <- table1_work |>
+  filter(characteristic!='Year') |> #Workaround for having an extra 'Year' column in Sunnybrook Data
+  rbind(table1) |>
+  mutate(value_n=fifelse(site=='Overall', overall_n, value_n),
+         site_mean_count=fifelse(site=='Overall' & mean_col==1, weighted_mean, site_mean_count),
+         site_mean_count=fifelse(site=='Overall' & mean_col==0, count, site_mean_count),
+         site_sd_perc=fifelse(site=='Overall' & mean_col==1, pooled_sd, site_sd_perc),
+         site_sd_perc=fifelse(site=='Overall' & mean_col==0, percent, site_sd_perc)) |>
+  pivot_wider(
+    id_cols = c('characteristic', 'mean_col'),
+    names_from = site,
+    values_from = c('site_mean_count', 'site_sd_perc', 'value_n'),
+    names_glue = "{site}_{.value}"
+  ) |>
+  select(-mean_col) |>
+  left_join(group_p_values) |>
+  relocate(
+    c('Overall_value_n' , 'Overall_site_mean_count', 'Overall_site_sd_perc'), .after = characteristic
+  )
+```
+
+```{r Formatted Table One -2}
+format_table1_for_reporting <- function(df) {
+  # Infer mean_col from characteristic if not already present
+  if (!"mean_col" %in% names(df)) {
+    df <- df %>%
+      mutate(mean_col = ifelse(grepl("mean \\(SD\\)", characteristic), 1, 0))
+  }
+
+  # Get site names
+  site_names <- unique(gsub("_site_mean_count", "", grep("_site_mean_count", names(df), value = TRUE)))
+
+  # Start building output
+  formatted_table <- df %>%
+    select(characteristic, mean_col)
+
+  for (site in site_names) {
+    mean_col_name <- paste0(site, "_site_mean_count")
+    sd_col_name   <- paste0(site, "_site_sd_perc")
+    n_col_name    <- paste0(site, "_value_n")
+
+    if (!(mean_col_name %in% names(df)) | !(sd_col_name %in% names(df)) | !(n_col_name %in% names(df))) {
+      next
+    }
+
+    formatted_col <- mapply(function(mean, sd_or_pct, n, is_mean, var_name) {
+      if (is.na(mean) || is.na(sd_or_pct) || is.na(n)) {
+        return(NA_character_)
+      }
+
+      # Special case: raw "n" row → just count
+      if (var_name == "n") {
+        return(as.character(round(mean)))
+      }
+
+      # Continuous variable
+      if (is_mean == 1) {
+        sprintf("%.2f (%.2f)", round(mean, 2), round(sd_or_pct, 2))
+      } else {
+        pct <- round((mean / n) * 100, 1)
+        sprintf("%d (%.1f%%)", round(mean), pct)
+      }
+    },
+    mean = df[[mean_col_name]],
+    sd_or_pct = df[[sd_col_name]],
+    n = df[[n_col_name]],
+    is_mean = df$mean_col,
+    var_name = df$characteristic,
+    SIMPLIFY = TRUE
+    )
+
+    formatted_table[[site]] <- formatted_col
+  }
+
+  return(formatted_table)
+}
+table1_formatted <- format_table1_for_reporting(table1_collated) |>
+  left_join(group_p_values) |>
+  select(-mean_col) |>
+  mutate(value_n=table1_collated$Overall_value_n) |>
+  relocate(value_n, .after = 'characteristic') |>
+  relocate(p_value, .before = 'f_stat')
+write.csv(table1_formatted, paste0(project_location, '/summary_output/table1_formatted.csv'))
+```
+
+```{r Load Estimates and Covariance Metrics for Each Site - Calculate Global Estimates for Fixed Effects}
+load_est <- function(site_name) {
+  est_key <- paste0(site_name, "_propensity_build_estimates")
+  df <- site_table_data[[est_key]]
+  as.numeric(df$estimate)
+}
+
+load_cov <- function(site_name) {
+  cov_key <- paste0(site_name, "_propensity_build_covariance")
+  df <- site_table_data[[cov_key]]
+  # Extract row names from V1 and remove the column
+  rownames(df) <- df$V1
+  df$V1 <- NULL
+  data.matrix(df)
+}
+
+
+fixed_eff_est <- lapply(sites, load_est)
+fixed_eff_cov <- lapply(sites, load_cov)
+
+# Compute the global estimate
+fixed_eff_prec <- lapply(fixed_eff_cov, function(cov_mtrx) solve(cov_mtrx))
+
+## Global precision (inverse covariance) is just the sum
+global_eff_prec <- Reduce("+", fixed_eff_prec)
+global_eff_cov <- solve(global_eff_prec)
+
+## Global coef is the weighted average
+global_eff_est <- rep(0, nrow(global_eff_cov))
+for (i in 1:length(sites)) {
+  global_eff_est <- global_eff_est + fixed_eff_prec[[i]] %*% fixed_eff_est[[i]]
+}
+global_eff_est <- global_eff_cov %*% global_eff_est
+
+eff_df <- data.frame(
+  'variable' = rownames(global_eff_est),
+  'coefficient' = global_eff_est
+) |>
+  pivot_wider(names_from = 'variable', values_from = 'coefficient', names_prefix='coef_')
+
+#Save Global Coefficients
+write.csv(eff_df, paste0(project_location, '/summary_output/global_coefficients.csv'))
+```
+
+```{r Table1 by Period}
+# Function to extract and collate specified tables from the site_table_data list
+#This Will Only Work with Tables with the Same Number of Columns
+# Function to extract and collate specified tables from the site_table_data list
+collate_table_one_period <- function(table_suffix) {
+  # Extract only data frames that match the pattern "[SITE]_table_suffix"
+  table_list <- lapply(sites, function(site) {
+    # Construct the key to extract the correct data frame
+    table_name <- paste(site, table_suffix, sep = "")
+    
+    if (table_name %in% names(site_table_data)) {
+      # Retrieve the data frame and add the 'site' column
+      df <- site_table_data[[table_name]]
+      colnames(df) <- as.character(unlist(df[1, ]))
+      df <- df |>
+        filter(row_number()>1)
+      # Define the desired columns
+    desired_cols <- c("characteristic", "site", 
+                      "Pre-COVID", "COVID", "Post-COVID", "percent_missing")
+
+# Make sure these columns exist
+missing_cols <- setdiff(desired_cols, names(df))
+if (length(missing_cols) > 0) {
+  for (col in missing_cols) {
+    df[[col]] <- NA  # Add missing columns as NA
+  }
+}
+
+# Reorder columns
+df <- df |> select(all_of(desired_cols))
+      return(df)
+    } else {
+      message(paste("Table not found for site:", site))
+      return(NULL)  # Return NULL if the table isn't found
+    }
+  })
+  
+  # Filter out NULL elements (sites that didn't have the table)
+  table_list <- Filter(Negate(is.null), table_list)
+  
+  # Combine all data frames into one using rbind
+  combined_table <- do.call(rbind, table_list)
+  
+  return(combined_table)
+}
+
+# Run the function
+tableone_master_period <- collate_table_one_period("_Table1_by_period") |>
+   mutate(characteristic = clean_characteristic(characteristic))
+
+#Remove All Variables Between Hospital and Year
+# Function to remove elements between 'hospital_id....' and next 'year....'
+vars <- tableone_master_period $characteristic
+# Apply function
+clean_vars <- remove_between_hospital_year(vars)
+
+##Filter Table ONe Master to These Clean Variable Lists
+tableone_master_period <- tableone_master_period |>
+  filter(characteristic %in% clean_vars) |>
+  mutate(characteristic=fifelse(
+    site=='Sunnybrook' & characteristic =='race_ethnicity = unknown (%)', 'unknown', characteristic)
+  )
+```
+
+```{r Table 1 Wide}
+#These are Cleaner Labels for the 'Characteristics' Variable
+unique_vars <- unique(clean_vars)
+
+wide_table_scaffold <- c(
+    "n",
+    "age_at_admission (mean (SD))",
+    "female",
+    "Race_ethnicity",
+    "Asian",
+    "Black, non-Hispanic",
+    "Hispanic",
+    "other_race",
+    "unknown_race",
+    "White, non-Hispanic",
+    "bmi (mean (SD))",
+    "2018",
+    "2019",
+    "2020",
+    "2021",
+    "2022",
+    "2023",
+    "2024",
+    "Study Period",
+    "COVID",
+    "Post_COVID",
+    "Pre_COVID",
+    "Period and SARS-CoV2",
+    "COVIDPeriod_SARCoV2Neg.Unk",
+    "COVID_SarsCov2Pos",
+    "Post_COVID_SarsCov2Neg.Unk",
+    "Post_COVID_SarsCov2Pos",
+    "Pre_COVID_Testing",
+    "eligible_by_proseva",
+    "eligible_by_prone",
+    "admit_to_enrolled (mean (SD)",
+    "ett_to_enrolled (mean (SD))",
+    "or_before_enrollment",
+    "min_pf_ratio (mean (SD))",
+    "severe_ards",
+    "first_vent_mode",
+    "AssistControl-VolumeControl",
+    "Other_Vent_Mode",
+    "Pressure_Control",
+    "Pressure_Support/CPAP",
+    "Pressure-Regulated-Volume-Control",
+    "SIMV",
+    "first_proseva_peep (mean (SD))",
+    "first_proseva_fio2 (mean (SD))",
+    "sofa_score (mean (SD))",
+    "Norepi Equivalent",
+    "No Norepi",
+    "LessThan0.01",
+    "MoreThan0.10",
+    "age_at_admission (mean (SD))",
+    "female",
+    "Race_ethnicity",
+    "Black, non-Hispanic",
+    "White, non-Hispanic",
+    "bmi (mean (SD))",
+    "Post_COVID",
+    "Period and SARS-CoV2",
+    "COVIDPeriod_SARCoV2Neg.Unk",
+    "Post_COVID_SarsCov2Neg.Unk",
+    "Post_COVID_SarsCov2Pos",
+    "eligible_by_proseva",
+    "eligible_by_prone",
+    "admit_to_enrolled (mean (SD)",
+    "ett_to_enrolled (mean (SD))",
+    "or_before_enrollment",
+    "min_pf_ratio (mean (SD))",
+    "severe_ards",
+    "first_vent_mode",
+    "AssistControl-VolumeControl",
+    "Pressure_Control",
+    "Pressure_Support/CPAP",
+    "Pressure-Regulated-Volume-Control",
+    "first_proseva_peep (mean (SD))",
+    "first_proseva_fio2 (mean (SD))",
+    "sofa_score (mean (SD))",
+    "Norepi Equivalent",
+    "APRV",
+    "unknown_race",
+    "Pre_COVID",
+    "Pre_COVID_Testing",
+    "Pressure_Control",
+    "Other_Vent_Mode"
+    )
+
+# Create lookup vector
+label_lookup <- setNames(wide_table_scaffold, unique_vars)
+
+# Now map labels to all of clean_vars
+mapped_labels <- label_lookup[clean_vars]
+
+# Result
+tableone_master_period$characteristic <- mapped_labels[tableone_master_period$characteristic] 
+
+#Go to Long FOrm
+table1_work_period <- tableone_master_period |>
+  filter(characteristic!='year') |>
+  pivot_longer(cols = c(`Pre-COVID`, COVID, `Post-COVID`),
+               names_to = 'period')
+```
+
+```{r Work Towards an Overall Table - 2}
+table1_work_period <- table1_work_period |>
+  # Extract mean and SD using regex
+  mutate(value=trimws(value),
+         site_mean_count=as.numeric(sub("\\s*\\(.*", "", value)), # Gets the mean/count
+         site_sd_perc=as.numeric(sub(".*\\((.*)\\).*", "\\1", value))) |>
+  #Define a Column is a Mean or SD Column
+  mutate(mean_col=fifelse(
+            grepl('mean', characteristic, ignore.case=T), 1, 0)) |>
+  group_by(characteristic, period, mean_col) |>
+  mutate(count=fifelse(
+         mean_col==0, sum(site_mean_count, na.rm=T), NaN)
+  ) |>
+  #Calculate Proportion Each Site Contributes (for Weighted Averages)
+  group_by(site, period) |>
+  mutate(site_n=fifelse(characteristic=='n', site_mean_count, NaN),
+         site_n=sum(site_n, na.rm=T),
+         #Account for Missingness
+         percent_missing=as.numeric(percent_missing),
+         percent_missing=fifelse(is.na(percent_missing), 0, percent_missing),
+         value_n = round((1 - percent_missing /100) * site_n, 0), site_n) |>
+  ungroup() |>
+  group_by(characteristic, period) |>
+  mutate(overall_n=sum(value_n, na.rm = TRUE),
+        weights = value_n / overall_n,
+        percent = fifelse(mean_col==0, round((count/overall_n)*100, 2), NaN)) |>
+   ungroup() |>
+  #Calculate Weighted Means by Period and Site - Checked and This Matches HMisc Function (wtd.mean)
+  group_by(characteristic, period) |>
+  mutate(weighted_mean=fifelse(
+    mean_col==1, round(sum(site_mean_count*weights, na.rm=T), 3), NaN)) |>
+  mutate(
+   pooled_sd = fifelse(
+     mean_col == 1,
+     round(sqrt(sum((value_n - 1) * site_sd_perc^2, na.rm = T) / 
+                 sum(value_n - 1, na.rm = T)), 2), NaN)) |>
+  ungroup()
+
+table1_period <- table1_work_period |>
+  filter(site=='Hopkins') |>
+  mutate(site='Overall')
+```
+
+```{r P Values For Between Site Comparisons Using Weighted ANOVA/Chi2}
+#Identify Columns For Weighted ANOVA (continuous Vars)
+mean_cols <- table1_work_period$characteristic[table1_work_period$mean_col==1]
+
+#Function for Weighted ANOVA from Summary Data
+weighted_anova_pval <- function(df, cols) {
+  df <- df |>
+    group_by(characteristic, period) |>
+    filter(characteristic %in% cols) |>
+  # Total number of groups
+    mutate(k=length(site_mean_count)) |>
+    #Between-group sum of squares (SSB)
+    mutate(ss_between=sum(value_n * ((site_mean_count-weighted_mean)^2), na.rm=T),
+           ss_within=sum((value_n - 1) * (site_sd_perc^2), na.rm=T),
+           # Degrees of freedom
+           df_between = k-1,
+           df_within = overall_n-k, 
+           # Mean squares
+           ms_between = ss_between/df_between,
+           ms_within = ss_within/df_within,
+           f_stat = round(ms_between/ms_within, 4),
+           p_value = round(pf(f_stat, df_between, df_within, lower.tail = FALSE), 4))
+  
+  new_columns <- df |>
+    select(characteristic, period, f_stat, p_value) |>
+    filter(row_number()==1) |>
+    ungroup()
+  return(new_columns)
+}
+group_p_values <- weighted_anova_pval(table1_work_period, mean_cols)
+
+#Now for Catgorical Weighted Chi 2
+#Have to Do Separately for Single and Multi Category Variables
+single_cat_cols <- table1_period$characteristic[table1_period$mean_col==0 &
+                                         table1_period$characteristic %in% c('female',
+                                      'eligible_by_proseva',
+                                      'eligible_by_prone',
+                                      'severe_ards')]
+
+weighted_chisq <- function(df, cols, add_to) {
+  #Filter to Categorical Columns
+  df_chi <- df |>
+    filter(characteristic %in% cols) |>
+    group_by(characteristic, period) |>
+    mutate(expected = (percent / 100) * site_n) |>
+    summarise(
+      chisq = sum(weights * (site_mean_count - expected)^2 / expected, na.rm = TRUE),
+      dfree = n() - 1,
+      p_value = round(pchisq(chisq, df = dfree, lower.tail = FALSE), 4),
+      .groups = "drop"
+  )
+  
+  df_chi <- df_chi |>
+    select(characteristic, period, chisq, p_value)
+  
+  add_to <- full_join(add_to, df_chi)
+  return(add_to)
+}
+group_p_values <- weighted_chisq(table1_work_period, single_cat_cols, group_p_values)
+
+#Have to Take a Different Approach to MultiVariable Categories
+weighted_chisq_multicat <- function(df, cat_var, parent_name, add_to) {
+  ## Step 1: Filter to Categories Within Parent Cateogry
+  sub_df <- df %>%
+  filter(characteristic %in% cat_var) %>%
+  #Calculate Expected
+  group_by(period) |>
+  mutate(expected = (percent / 100) * site_n) |>
+    summarise(
+    chisq = sum(weights * (site_mean_count - expected)^2 / expected, na.rm = TRUE),
+    n_categories = n_distinct(characteristic),
+    n_sites = n_distinct(site),
+    dfree = (n_categories - 1) * (n_sites - 1),
+    .groups = "drop"  # Ungroup after summarising
+  )
+
+#Pull Out as Vectors
+chisq <- sub_df$chisq
+dfree <- sub_df$dfree 
+
+final_df <- data.frame(
+  characteristic = parent_name,
+  period = sub_df$period,
+  chisq = round(chisq, 4),
+  p_value = round(pchisq(chisq, df = dfree, lower.tail = FALSE), 4)
+)
+
+add_to <- full_join(add_to, final_df)
+  return(add_to)
+}
+#Now for Race/Ethnicity Categories
+race_cat <- c('Asian', 'Black, non-Hispanic', 'Hispanic', 'other_race', 'unknown_race', 'White, non-Hispanic')
+group_p_values <- weighted_chisq_multicat(table1_work_period, race_cat, parent_name='Race_ethnicity', group_p_values)
+#Now for Year
+years <- c('2018', '2019', '2020', '2021', '2022', '2023', '2024')
+group_p_values <- weighted_chisq_multicat(table1_work_period, years, parent_name='2018', group_p_values)
+study_period <- c('Pre_COVID', 'COVID', 'Post_COVID')
+group_p_values <- weighted_chisq_multicat(table1_work_period, study_period, parent_name='Study Period', group_p_values)
+sars_period <- c('COVIDPeriod_SARCoV2Neg.Unk', 
+                 'COVID_SarsCov2Pos', 
+                 'Post_COVID_SarsCov2Neg.Unk', 
+                 'Post_COVID_SarsCov2Pos')
+group_p_values <- weighted_chisq_multicat(table1_work_period, sars_period, parent_name='Period and SARS-CoV2', group_p_values)
+
+vent_mode <- c('AssistControl-VolumeControl', 'Other_Vent_Mode', 'Pressure_Control',
+               'Pressure_Support/CPAP', 'Pressure-Regulated-Volume-Control', 'SIMV')
+group_p_values <- weighted_chisq_multicat(table1_work_period, vent_mode, parent_name='first_vent_mode', group_p_values)
+
+norepi <- c('No Norepi', 'LessThan0.01', 'MoreThan0.10')
+group_p_values <- weighted_chisq_multicat(table1_work_period, norepi, parent_name='Norepi Equivalent', group_p_values) 
+```
+```{r Now get P Values for Comparison Across Periods Rather THan Site}
+#Identify Columns For Weighted ANOVA (continuous Vars)
+mean_cols <- table1_work_period$characteristic[table1_work_period$mean_col==1]
+
+#Function for Weighted ANOVA from Summary Data
+weighted_anova_pval <- function(df, cols) {
+  df <- df |>
+    group_by(characteristic) |>
+    filter(characteristic %in% cols) |>
+  # Total number of groups
+    mutate(k=length(site_mean_count)) |>
+    #Between-group sum of squares (SSB)
+    #Here Use the Weighted Mean per Period that is Already Calculated
+    mutate(ss_between=sum(overall_n * ((weighted_mean-mean(weighted_mean, na.rm=T))^2), na.rm=T),
+           ss_within=sum((overall_n - 1) * (site_sd_perc^2), na.rm=T),
+           # Degrees of freedom
+           df_between = k-1,
+           df_within = sum(overall_n, na.rm=T)-k, 
+           # Mean squares
+           ms_between = ss_between/df_between,
+           ms_within = ss_within/df_within,
+           period_f_stat = round(ms_between/ms_within, 4),
+           period_p_value = round(pf(period_f_stat, df_between, df_within, lower.tail = FALSE), 4))
+  
+  new_columns <- df |>
+    select(characteristic, period, period_f_stat, period_p_value) |>
+    filter(row_number()==1) |>
+    ungroup()
+  return(new_columns)
+}
+period_p_values <- weighted_anova_pval(table1_period, mean_cols)
+
+#Now for Catgorical Weighted Chi 2
+#Have to Do Separately for Single and Multi Category Variables
+single_cat_cols <- table1_period$characteristic[table1_period$mean_col==0 &
+                                         table1_period$characteristic %in% c('female',
+                                      'eligible_by_proseva',
+                                      'eligible_by_prone',
+                                      'severe_ards')]
+
+weighted_chisq <- function(df, cols, add_to) {
+  #Filter to Categorical Columns
+  df_chi <- df |>
+    filter(characteristic %in% cols) |>
+    group_by(characteristic) |>
+    mutate(expected = (sum(count, na.rm=T) /sum(overall_n, na.rm=T))*overall_n) |>
+    summarise(
+      period_chisq = sum((count - expected)^2 / expected,  #   test statistic
+                 na.rm = TRUE),
+      dfree = n() - 1,
+      period_p_value = round(pchisq(period_chisq, df = dfree, lower.tail = FALSE), 4),
+      .groups = "drop"
+  ) |>
+    mutate(period = 'Pre-COVID')
+  
+  df_chi <- df_chi |>
+    select(characteristic, period, period_chisq, period_p_value)
+  
+  add_to <- full_join(add_to, df_chi)
+  return(add_to)
+}
+period_p_values <- weighted_chisq(table1_period, single_cat_cols, period_p_values)
+
+#Have to Take a Different Approach to MultiVariable Categories
+weighted_chisq_multicat <- function(df, cat_var, parent_name, add_to) {
+  ## Step 1: Filter to Categories Within Parent Cateogry
+  sub_df <- df %>%
+  filter(characteristic %in% cat_var) %>%
+  group_by(characteristic) %>%
+  #Calculate Expected
+  mutate(expected=(sum(count, na.rm=T) /sum(overall_n, na.rm=T))*overall_n) |>
+  ungroup() %>%
+  summarise(
+    period_chisq = sum((count - expected)^2 / expected,  #   test statistic
+                 na.rm = TRUE),
+    n_categories = n_distinct(characteristic),
+    n_periods = n_distinct(period),
+    dfree = (n_categories - 1) * (n_periods - 1),
+    .groups = "drop"  # Ungroup after summarising
+  )
+
+#Pull Out as Vectors
+period_chisq <- sub_df$period_chisq
+dfree <- sub_df$dfree 
+
+final_df <- data.frame(
+  characteristic = parent_name,
+  period = 'Pre-COVID',
+  period_chisq = round(period_chisq, 4),
+  period_p_value = round(pchisq(period_chisq, df = dfree, lower.tail = FALSE), 4)
+)
+
+add_to <- full_join(add_to, final_df)
+  return(add_to)
+}
+#Now for Race/Ethnicity Categories
+race_cat <- c('Asian', 'Black, non-Hispanic', 'Hispanic', 'other_race', 'unknown_race', 'White, non-Hispanic')
+period_p_values <- weighted_chisq_multicat(table1_period, race_cat, parent_name='Race_ethnicity', period_p_values)
+#Now for Year
+years <- c('2018', '2019', '2020', '2021', '2022', '2023', '2024')
+period_p_values <- weighted_chisq_multicat(table1_period, years, parent_name='2018', period_p_values)
+study_period <- c('Pre_COVID', 'COVID', 'Post_COVID')
+period_p_values <- weighted_chisq_multicat(table1_period, study_period, parent_name='Study Period', period_p_values)
+sars_period <- c('COVIDPeriod_SARCoV2Neg.Unk', 
+                 'COVID_SarsCov2Pos', 
+                 'Post_COVID_SarsCov2Neg.Unk', 
+                 'Post_COVID_SarsCov2Pos')
+period_p_values <- weighted_chisq_multicat(table1_period, sars_period, parent_name='Period and SARS-CoV2', period_p_values)
+
+vent_mode <- c('AssistControl-VolumeControl', 'Other_Vent_Mode', 'Pressure_Control',
+               'Pressure_Support/CPAP', 'Pressure-Regulated-Volume-Control', 'SIMV')
+period_p_values <- weighted_chisq_multicat(table1_period, vent_mode, parent_name='first_vent_mode', period_p_values)
+
+norepi <- c('No Norepi', 'LessThan0.01', 'MoreThan0.10')
+period_p_values <- weighted_chisq_multicat(table1_period, norepi, parent_name='Norepi Equivalent', period_p_values)
+```
+
+
+
+```{r Put Table One Period Together}
+table1_collated <- table1_work_period |>
+  rbind(table1_period) |>
+  group_by(period) |>
+  mutate(value_n=fifelse(site=='Overall', overall_n, value_n),
+         site_mean_count=fifelse(site=='Overall' & mean_col==1, weighted_mean, site_mean_count),
+         site_mean_count=fifelse(site=='Overall' & mean_col==0, count, site_mean_count),
+         site_sd_perc=fifelse(site=='Overall' & mean_col==1, pooled_sd, site_sd_perc),
+         site_sd_perc=fifelse(site=='Overall' & mean_col==0, percent, site_sd_perc)) |>
+  select(-mean_col) |>
+  pivot_wider(
+    id_cols = c('characteristic'),
+    names_from = c('site', 'period'),
+    values_from = c('site_mean_count', 'site_sd_perc', 'value_n'),
+    names_glue = "{site}_{period}_{.value}"
+  ) |>
+  left_join(period_p_values) |>
+  left_join(group_p_values) |>
+  relocate(
+    dplyr::starts_with('overall'), .after = characteristic
+  ) |>
+  group_by(characteristic) |>
+  slice_head(n=1) |>
+  ungroup()
+```
+
+```{r Formatted Table One By Period}
+format_table1_for_reporting <- function(df) {
+  # Infer mean_col from characteristic if not already present
+  if (!"mean_col" %in% names(df)) {
+    df <- df %>%
+      mutate(mean_col = ifelse(grepl("mean \\(SD\\)", characteristic), 1, 0))
+  }
+
+  # Get site names
+  site_names <- unique(gsub("_site_mean_count", "", grep("_site_mean_count", names(df), value = TRUE)))
+
+  # Start building output
+  formatted_table <- df %>%
+    select(characteristic, mean_col)
+
+  for (site in site_names) {
+    mean_col_name <- paste0(site, "_site_mean_count")
+    sd_col_name   <- paste0(site, "_site_sd_perc")
+    n_col_name    <- paste0(site, "_value_n")
+
+    if (!(mean_col_name %in% names(df)) | !(sd_col_name %in% names(df)) | !(n_col_name %in% names(df))) {
+      next
+    }
+
+    formatted_col <- mapply(function(mean, sd_or_pct, n, is_mean, var_name) {
+      if (is.na(mean) || is.na(sd_or_pct) || is.na(n)) {
+        return(NA_character_)
+      }
+
+      # Special case: raw "n" row → just count
+      if (var_name == "n") {
+        return(as.character(round(mean)))
+      }
+
+      # Continuous variable
+      if (is_mean == 1) {
+        sprintf("%.2f (%.2f)", round(mean, 2), round(sd_or_pct, 2))
+      } else {
+        pct <- round((mean / n) * 100, 1)
+        sprintf("%d (%.1f%%)", round(mean), pct)
+      }
+    },
+    mean = df[[mean_col_name]],
+    sd_or_pct = df[[sd_col_name]],
+    n = df[[n_col_name]],
+    is_mean = df$mean_col,
+    var_name = df$characteristic,
+    SIMPLIFY = TRUE
+    )
+
+    formatted_table[[site]] <- formatted_col
+  }
+
+  return(formatted_table)
+}
+table1_formatted_period <- format_table1_for_reporting(table1_collated) |>
+  left_join(period_p_values) |>
+  left_join(group_p_values) |>
+  group_by(characteristic) |>
+  slice_head(n=1) |>
+  select(-mean_col) |>
+  relocate(p_value, .before = 'f_stat') |>
+  relocate(period_p_value, period_f_stat, period_chisq, .after = 'Overall_Post-COVID')
+
+#Same Order as Original Table
+table1_formatted_period <- table1_formatted |> select(characteristic) |>
+  left_join(table1_formatted_period)
+write.csv(table1_formatted_period, paste0(project_location, '/summary_output/table1_byperiod_formatted.csv'))
+```
+
+```{r Collate Global Aggregate Tables}
+global_aggregate_by_proned <- collate_tables('_global_aggregate_pronerisk_by_outcome')
+write.csv(global_aggregate_by_proned, paste0(project_location, '/summary_output/global_aggregate_byoutcome.csv'))
+
+global_aggregate_by_proned_period <- collate_tables('_global_aggregate_pronerisk_by_outcome_period')
+write.csv(global_aggregate_by_proned_period, paste0(project_location, '/summary_output/global_aggregate_byoutcome_period.csv'))
+
+global_aggregate_by_proned_period_sars <- collate_tables('_global_aggregate_expected_prone_wCOVID-Status')
+write.csv(global_aggregate_by_proned_period_sars, paste0(project_location, '/summary_output/global_aggregate_by_proned_period_sars.csv'))
+
+global_aggregate_by_proned_period_sars <- collate_tables('_global_aggregate_expected_prone_wCOVID-Status_post')
+write.csv(global_aggregate_by_proned_period_sars, paste0(project_location, '/summary_output/global_aggregate_by_proned_period_sars_post.csv'))
+```
+

@@ -1,0 +1,823 @@
+---
+title: "Analysis_01_prone_incidence_risk_reliability"
+author: "Chad H Hochberg and Anna Barker"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+#Specify Project Location and File Type
+```{r}
+project_location <- '~/Library/CloudStorage/OneDrive-JohnsHopkins/Research Projects/CLIF/CLIF_Projects/ProneProjects/ProningEpi/ProneSevereARF_Output'
+file_type <- 'csv'
+
+#Create Sub Folders within Project Folder
+# Check if the output directory exists; if not, create it
+if (!dir.exists(paste0(project_location, "/summary_analysis"))) {
+  dir.create(paste0(project_location, "/summary_analysis"))
+}
+```
+
+
+```{r Load Needed Libraries, include=FALSE}
+packages <- c( 
+  'marginaleffects',
+  'MetBrewer', 
+  'brms',
+  'rstanarm',
+  'ggpubr',
+  'data.table', 
+  'tidyverse'
+)
+install_if_missing <- function(package) {
+  if (!require(package, character.only = TRUE)) {
+    install.packages(package, dependencies = TRUE)
+    library(package, character.only = TRUE)
+  }
+}
+
+sapply(packages, install_if_missing)
+rm(packages, install_if_missing)
+
+#Use Dplyr select as default
+select <- dplyr::select
+
+```
+
+```{r Load and Prepare Needed Data}
+df_agg <- read.csv(paste0(project_location, '/summary_output/aggregate_data.csv')) |>
+  #Prepare to merge in Hospital Details
+  mutate(
+    hospital_id=fifelse(
+        hospital_id=='HUP', 'penn_hup', hospital_id),
+    hospital_id=fifelse(
+      hospital_id=='HUPME', 'penn_hupme', hospital_id),
+    hospital_id=fifelse(
+      hospital_id=='PAH', 'penn_pah', hospital_id),
+    hospital_id=fifelse(
+      hospital_id=='PPMC', 'penn_ppmc', hospital_id),
+    hospital_id=fifelse(
+      hospital_id=='UMCOP', 'penn_umcop', hospital_id),
+    hospital_id=fifelse(
+      hospital_id=='CCH', 'penn_cch', hospital_id)
+    )
+
+clif_hospital_description <- read.csv(paste0(project_location, '/clif_hospital_description.csv')) 
+
+#Merge Hospital Data Into DF AGG
+df_agg <- df_agg |>
+  left_join(clif_hospital_description %>% select(hospital_id, Hospital_Type, Number_of_ICU_Beds)) |>
+  #Define Hospital_Size Categorical Variable
+  mutate(icu_bed_cat=fcase(
+   Number_of_ICU_Beds<20, 0,
+   Number_of_ICU_Beds>=20 & Number_of_ICU_Beds<50, 1,
+   Number_of_ICU_Beds>=50, 2
+  )) |>
+ ## 1. numeric 0 / 1 / 2 bucket --------------------------------------------
+  mutate(
+    icu_bed_cat = fcase(
+      Number_of_ICU_Beds < 20,                           0L,      # small
+      Number_of_ICU_Beds >= 20 & Number_of_ICU_Beds < 50, 1L,      # medium
+      Number_of_ICU_Beds >= 50,                           2L,      # large
+      default = NA_integer_
+    )
+  ) %>% 
+  ## 2. labelled factor ------------------------------------------------------
+  mutate(
+    icu_bed_cat = factor(
+      icu_bed_cat,
+      levels = 0:2,                                    # make sure levels match
+      labels = c("small", "medium", "large")
+    )
+  )
+```
+
+```{r How Many Academic Hospitals are In These Data}
+#Do this Before Filtering
+df_unique_hosp <- df_agg |> distinct(hospital_id, Hospital_Type)
+cat('\nHow Many Academic v Community Hospitals are In THese Data')
+table(df_unique_hosp$Hospital_Type)
+
+df_hosptype_summary <- df_agg |>
+  group_by(Hospital_Type, study_period) |>
+  summarise(
+    n_Hospitals=n(),
+    n_patients=sum(n_patients, na.rm=T),
+    n_proned=sum(observed_prone, na.rm=T),
+    percent_proned=round((n_proned/n_patients)*100, 2)
+  ) |>
+  arrange(study_period, Hospital_Type)
+df_hosptype_summary
+
+#Hospital Size by Period
+df_hospsize <- df_agg |>
+  group_by(study_period) |>
+  summarise(
+    small_icus =sum(icu_bed_cat=='small'),
+    medium_icus = sum(icu_bed_cat=='medium'),
+    large_icus = sum(icu_bed_cat=='large')
+  )
+cat('\nHospital Size Description')
+df_hospsize
+
+#Filter Out Hospitals with Less Than 10 Patients
+df_agg <- df_agg |>
+  #Filter OUT HOspitals-Periods with < 10 observations
+  filter(n_patients>=10)
+
+#Now After Filtering
+cat('\nAfer Filtering Out Hospitals with >= 10 Patients \nHow Many Academic v Community Hospitals are In THese Data')
+table(df_agg$Hospital_Type)
+
+df_hosptype_summary_post <- df_agg |>
+  group_by(Hospital_Type, study_period) |>
+  summarise(
+    n_Hospitals=n(),
+    n_patients=sum(n_patients, na.rm=T),
+    n_proned=sum(observed_prone, na.rm=T),
+    percent_proned=round((n_proned/n_patients)*100, 2)
+  ) |>
+  arrange(study_period, Hospital_Type)
+cat('\nProning Counts in Hospitals with >= 10 Patients')
+df_hosptype_summary
+
+#Hospital Size by Period
+df_hospsize <- df_agg |>
+  group_by(study_period) |>
+  summarise(
+    small_icus =sum(icu_bed_cat=='small'),
+    medium_icus = sum(icu_bed_cat=='medium'),
+    large_icus = sum(icu_bed_cat=='large')
+  )
+cat('\nHospital Size Description')
+df_hospsize
+
+#Academic Size Summary
+df_hospsize <- df_agg |>
+  group_by(Hospital_Type) |>
+  summarise(
+    small_icus =sum(icu_bed_cat=='small'),
+    medium_icus = sum(icu_bed_cat=='medium'),
+    large_icus = sum(icu_bed_cat=='large')
+  )
+cat('\nHospital Size Description by Hospital Type')
+df_hospsize
+
+#Proning By Hospital Size
+df_hospsize <- df_agg |>
+  group_by(icu_bed_cat, study_period) |>
+  summarise(
+    n_Hospitals=n(),
+    n_patients=sum(n_patients, na.rm=T),
+    n_proned=sum(observed_prone, na.rm=T),
+    percent_proned=round((n_proned/n_patients)*100, 2)
+  ) |>
+  arrange(study_period, icu_bed_cat)
+cat('\nProning Counts by Hospital Size and Period')
+df_hospsize
+```
+```{r Merge in the Proning Log Odds for Proned and Unproned Patients at Each Hospital}
+#Create Row For Each Proned Summary Data and Unproned Summary Data
+df_agg_unproned <- df_agg
+df_agg_proned <- df_agg_unproned %>%
+  mutate(n_patients = observed_prone, prone_12hour_outcome = 1)
+df_agg_unproned <- df_agg_unproned |>
+  mutate(n_patients = not_prone, observed_prone = 0, prone_12hour_outcome = 0)
+df_agg <- bind_rows(df_agg_proned, df_agg_unproned)
+
+#Merge in Proning Adjusted Rate for Each Hospital By Proned/Unproned Status
+global_agg_byoutcome_period <- read.csv(paste0(project_location, '/summary_output/global_aggregate_byoutcome_period.csv')) |>
+  mutate(prone_log_odds = log(prone_rate_adjust / (1 - prone_rate_adjust))) |>
+  select(hospital_id, prone_12hour_outcome, prone_log_odds, study_period) |>
+  #Prepare to merge in Hospital Details
+  mutate(
+    hospital_id=fifelse(
+        hospital_id=='HUP', 'penn_hup', hospital_id),
+    hospital_id=fifelse(
+      hospital_id=='HUPME', 'penn_hupme', hospital_id),
+    hospital_id=fifelse(
+      hospital_id=='PAH', 'penn_pah', hospital_id),
+    hospital_id=fifelse(
+      hospital_id=='PPMC', 'penn_ppmc', hospital_id),
+    hospital_id=fifelse(
+      hospital_id=='UMCOP', 'penn_umcop', hospital_id),
+    hospital_id=fifelse(
+      hospital_id=='CCH', 'penn_cch', hospital_id)
+    )
+
+#Merge Back with DF Agg
+df_agg <- left_join(df_agg, global_agg_byoutcome_period) |>
+  #IF there were no patients proned can use the popensity for unproned patients by filling here
+  group_by(hospital_id, study_period) |>
+  arrange(hospital_id, study_period, prone_12hour_outcome) |>
+  fill(prone_log_odds, .direction = 'down') |>
+  ungroup()
+```
+
+
+```{r Now Bayesian Hierarchical Model Including Hospital Type and Hospital Size}
+#Use Methods from Yarnell et al (PMID: 31359459)
+#Bayesian Hierarchial Model with Random Effects for Hospital and Study Period 
+#Also Includes Hospital Type and Hospital Type and Period Interaction
+#ICU Capacity is colinear with academic or community so have taken that out of the model
+
+priors <- c(
+  #Pre-COVID Proning Prior: Weakly Informative Centered Around Prob of Proning of 12% with 95% of prior probability in  5-50% rnage
+  prior(normal(-2, 1), class = "b", coef = 'study_periodPreMCOVID'),  
+  #COVID Proning Prior: Weakly Informative Centered Around Prob of Proning of 50% in COVID era and with 95% of these probability ranging from 12-88%
+  prior(normal(0, 1), class = "b", coef = 'study_periodCOVID'),
+  #Post-COVID Proning Prior: Weakly Informative Centered Around Prob of Proning of 12% in COVID era and with 95% of these probability ranging from 5-50%
+  prior(normal(-2, 1), class = "b", coef = 'study_periodPostMCOVID'), 
+  #Flat Priors for Hospital Type and Size
+  prior(normal(0,1), class = "b", coef = 'Hospital_TypeCommunity'),
+  #Half Normal Weakly Informative but Regularizing Prior for Random Effects
+  prior(normal(0,1), class = "sd"))         
+
+#Bayesian Hierarchical Model with varying slopes by study_period and allowing for interaction term between hospital type and period
+agg_brm_period_full <- brm(
+  bf(observed_prone | trials(n_patients) ~ 
+       0 + offset(prone_log_odds) + study_period + study_period * Hospital_Type +
+     (0 + study_period | hospital_id)), 
+  data = df_agg,
+  family = binomial,
+  prior = priors, 
+  cores = 4,
+  control = list(adapt_delta = 0.99)
+)
+
+# Examine model fit and summaries
+plot(agg_brm_period_full)
+summary(agg_brm_period_full)
+
+#Now Generate Odds Ratios for Communtiy vs Academic Proning by Period
+full_posterior <- as_draws_df(agg_brm_period_full)  |>
+  mutate(pre_covid = exp(b_Hospital_TypeCommunity + `b_study_periodPreMCOVID:Hospital_TypeCommunity`),
+         covid = exp(b_Hospital_TypeCommunity),
+         post_covid = exp(b_Hospital_TypeCommunity + `b_study_periodPostMCOVID:Hospital_TypeCommunity`))
+
+summary_posterior <- data.frame(
+  variable = c(
+    'Pre-COVID Community Hospital',
+    'COVID Community Hospital', 
+    'Post-COVID Community Hospital'
+  ),
+  median_or = c(median(full_posterior$pre_covid),
+              median(full_posterior$covid),
+              median(full_posterior$post_covid)),
+  conf.low = c(quantile(full_posterior$pre_covid, p=0.05),
+               quantile(full_posterior$covid, p=0.05),
+               quantile(full_posterior$post_covid, p=0.05)),
+  conf.high = c(quantile(full_posterior$pre_covid, p=0.95),
+               quantile(full_posterior$covid, p=0.95),
+               quantile(full_posterior$post_covid, p=0.95)))
+print(summary_posterior)
+write.csv(summary_posterior, paste0(project_location, '/summary_output/summary_posterior.csv'))
+```
+
+```{r Caterpillar Plots Based on Full Adjustment (Including Hospital Type and Size)}
+####Predictions Command from Marginal Effects with 4000 posterior draws
+reliability_adjust_full <- predictions(agg_brm_period_full, 
+                                  type = 'response', ndraws=4000, re_formula =  ~ (0 + study_period | hospital_id))
+reliability_adjust_full <- as_tibble(reliability_adjust_full) |>
+  left_join(df_agg %>% 
+         select('hospital_id', 'Hospital_Type', 'Number_of_ICU_Beds', 'prone_log_odds', 'study_period', 'prone_12hour_outcome'), 
+         by = c('hospital_id', 'study_period', 'prone_log_odds')) |>
+  #Need to Recombine Prone_12hour_outcome Estimates into 1 Per Hospital and Period
+  group_by(hospital_id, study_period) |>
+  mutate(
+    estimate_add=sum(estimate, na.rm=T),
+    ci_low_add=sum(conf.low, na.rm=T),
+    ci_hi_add=sum(conf.high, na.rm=T),
+    n_patients=sum(n_patients, na.rm=T)
+  ) |>
+  arrange(hospital_id, study_period, -prone_12hour_outcome) |> #THis Arranges so Row Number 1 is the prone_12hour_outcome==1
+  filter(row_number()==1) |>
+  ungroup() |>
+  mutate(adjust_rate=estimate_add/n_patients) |>
+  mutate(ci_low=ci_low_add/n_patients) |>
+  mutate(ci_hi=ci_hi_add/n_patients) |>
+  mutate(period_rank=fcase(
+    study_period=='Pre-COVID', 0, 
+    study_period=='COVID', 1, 
+    study_period=='Post-COVID', 2
+  )) |>
+  #Orders for Graph
+  arrange(period_rank, adjust_rate) |>
+  mutate(hospital_rank=row_number()) |>
+  mutate(actual_rate=observed_prone/n_patients) |>
+  mutate(grouping='Actual Rate') |>
+  left_join(df_agg %>% select('hospital_id', 'Hospital_Type', 'Number_of_ICU_Beds')) |>
+  distinct()
+
+break_points <- reliability_adjust_full |>
+  mutate(pre_covid_num=fcase(
+    row_number()!=1 & study_period=='Pre-COVID' & lead(study_period)=='COVID', hospital_rank),
+    post_covid_num=fcase(
+      study_period=='COVID' & lead(study_period)=='Post-COVID', hospital_rank
+    )) |>
+  summarise(
+    pre_covid_num=mean(pre_covid_num,na.rm=T)+0.5,
+    post_covid_num=mean(post_covid_num, na.rm=T)+0.5)
+
+
+caterpillar_hospital_type <- ggplot(reliability_adjust_full, 
+                              aes(x = hospital_rank,
+                                  y = adjust_rate)) +
+  geom_line(aes(x = hospital_rank,
+                y = adjust_rate, group=study_period), color='lightgrey') +
+  geom_linerange(aes(ymin = ci_low, ymax = ci_hi, color= Hospital_Type)) +
+  geom_point(aes(color=Hospital_Type)) +  # Add points for center effects
+  scale_x_continuous(
+    breaks = seq(1, nrow(reliability_adjust_full), by=1), 
+    labels = NULL  # Optionally use hospital IDs as labels
+  ) +
+  scale_y_continuous(breaks=seq(0,1.0, by=0.1), 
+                     labels = scales::percent, 
+                     limits = c(0,1.0)) +
+  MetBrewer::scale_color_met_d("Hokusai3") + #MetBrewer has many pallettes to choose from
+  labs(
+    x = "Hospitals",
+    y = "Proned Within 12 Hours",
+    caption = "Error bars represent 95% credible intervals"
+  )  +
+  geom_vline(xintercept = break_points$pre_covid_num, linetype = 2, linewidth=0.3) +
+  annotate("text", x = 7, y = 0.95, label = 'Pre Pandemic', fontface = 'bold') +
+  geom_vline(xintercept = break_points$post_covid_num, linetype = 2, linewidth=0.3) +
+  annotate("text", x = 35.5, y = 0.95, label = 'Pandemic', fontface = 'bold') +
+  annotate("text", x = 68, y = 0.95, label = 'Post Pandemic', fontface = 'bold') +
+  theme_classic() +
+  theme(panel.grid.major.x=element_blank(),
+        panel.grid.minor.x=element_blank(),
+        panel.grid.minor.y=element_blank(),
+        axis.line.x = element_line(color = "black", linewidth = 0.5)) 
+caterpillar_hospital_type
+ggsave('caterpillar_hospital_byperiod_fully_adjusted.pdf', 
+       path = paste0(project_location, '/summary_output/graphs/'),
+       width = 12,       # adjust width to make it wide
+  height = 6,       # adjust height for PowerPoint-friendly proportions
+  units = "in")    # units set to inches for precise control)
+  
+#With Actual Rate
+#Add the Actual Value
+with_rate <- caterpillar_hospital_type +
+  geom_point(aes(y=observed_prone/n_patients), color = 'maroon', alpha = 0.25)
+with_rate
+ggsave('caterpillar_fully_adjusted.pdf', 
+       path = paste0(project_location, '/summary_output/graphs/'),
+       width = 12,       # adjust width to make it wide
+  height = 6,       # adjust height for PowerPoint-friendly proportions
+  units = "in")    # units set to inches for precise control)
+```
+
+```{r Stacked Caterpillar Plots}
+#Stack Caterpillar Plots Vertically
+vertical_data <- reliability_adjust_full |>
+  group_by(study_period) |>
+  arrange(study_period, adjust_rate) |>
+  mutate(hospital_rank=row_number()) |>
+  ungroup()
+
+vertical <-ggplot(vertical_data, 
+                              aes(x = hospital_rank,
+                                  y = adjust_rate)) +
+  geom_line(aes(x = hospital_rank,
+                y = adjust_rate, group=study_period), color='lightgrey') +
+  geom_linerange(aes(ymin = ci_low, ymax = ci_hi, color= Hospital_Type)) +
+  geom_point(aes(color=Hospital_Type)) +  # Add points for center effects
+  scale_x_continuous(
+    breaks = seq(1, nrow(reliability_adjust_full), by=1), 
+    labels = NULL  # Optionally use hospital IDs as labels
+  ) +
+  scale_y_continuous(breaks=seq(0,1.0, by=0.2), 
+                     labels = scales::percent, 
+                     limits = c(0,1.0)) +
+  MetBrewer::scale_color_met_d("Hokusai3") + #MetBrewer has many pallettes to choose from
+  labs(
+    x = "Hospitals\nRanked by Proning Use",
+    y = "% Eligible Patients Proned Within 12 Hours",
+    caption = "Error bars represent 95% credible intervals"
+  )  +
+  theme_minimal() +
+  theme(panel.grid.major.x=element_blank(),
+        panel.grid.minor.x=element_blank(),
+        panel.grid.minor.y=element_blank(),
+        axis.line.x = element_line(color = "black", linewidth = 0.25),
+        strip.background = element_rect(fill = "grey90", color = NA),
+    strip.text       = element_text(color = "black"),
+    legend.position = c(0.1, 0.90),
+    legend.background = element_rect(fill = "white", color = "grey"),
+    legend.title = element_text(size = 9)) +
+    facet_wrap(~factor(study_period, c('Pre-COVID', 'COVID', 'Post-COVID')), 
+               ncol=1,
+               scales='free_x')
+ggsave('vertical_caterpillar.pdf', 
+       path = paste0(project_location, '/summary_output/graphs/'),
+       width = 12,       # adjust width to make it wide
+  height = 6,       # adjust height for PowerPoint-friendly proportions
+  units = "in")    # units set to inches for precise control)
+
+verticald <-ggplot(vertical_data, 
+                  aes(x = hospital_rank,
+                      y = adjust_rate)) +
+  geom_line(aes(x = hospital_rank,
+                y = adjust_rate, group=study_period), color='lightgrey') +
+  geom_linerange(aes(ymin = ci_low, ymax = ci_hi, color= Hospital_Type)) +
+  geom_point(aes(color=Hospital_Type)) +  # Add points for center effects
+  scale_x_continuous(
+    breaks = seq(1, nrow(reliability_adjust_full), by=1), 
+    labels = NULL  # Optionally use hospital IDs as labels
+  ) +
+  scale_y_continuous(breaks=seq(0,1.0, by=0.2), 
+                     labels = scales::percent, 
+                     limits = c(0,1.0)) +
+  MetBrewer::scale_color_met_d("Hokusai3") + #MetBrewer has many pallettes to choose from
+  labs(
+    x = "Hospitals\nRanked by Proning Use",
+    y = "% Eligible Patients Proned Within 12 Hours",
+    caption = "Error bars represent 95% credible intervals"
+  )  +
+  theme_minimal() +
+  theme(panel.grid.major.x=element_blank(),
+        panel.grid.minor.x=element_blank(),
+        panel.grid.minor.y=element_blank(),
+        axis.line.x = element_line(color = "black", linewidth = 0.25),
+        strip.background = element_rect(fill = "grey90", color = NA),
+        strip.text       = element_text(color = "black"),
+        legend.position = c(0.75, 0.85),
+        legend.background = element_rect(fill = "white", color = "grey"),
+        legend.title = element_text(size = 12),
+        legend.key.height   = unit(1.5, "lines"),
+        legend.key.width = unit(2.2, 'lines')) +
+  facet_wrap(~factor(study_period, c('Pre-COVID', 'COVID', 'Post-COVID')), 
+             ncol=1)
+
+ggsave('vertical_caterpillar_option_D.pdf', 
+       path = paste0(project_location, '/summary_output/graphs/'),
+       width = 12,       # adjust width to make it wide
+       height = 6,       # adjust height for PowerPoint-friendly proportions
+       units = "in")    # units set to inches for precise control)
+
+stacked_data <- vertical_data |>
+  group_by(study_period) |>
+  arrange(study_period, adjust_rate) |>
+  mutate(hospital_rank=if_else(
+    study_period=='COVID', row_number(), NA_real_
+  )) |>
+  group_by(hospital_id) |>
+  fill(hospital_rank, .direction = 'updown')
+
+stacked <- ggplot(stacked_data, 
+                  aes(x = hospital_rank,
+                      y = adjust_rate)) +
+  geom_line(aes(x = hospital_rank,
+                y = adjust_rate, group=study_period, color = study_period)) +
+  geom_linerange(aes(ymin = ci_low, ymax = ci_hi, color= study_period), alpha = 0.4) +
+  geom_point(aes(color=study_period, shape=Hospital_Type), size = 2.5) +  # Add points for center effects
+  scale_x_continuous(
+    breaks = seq(1, nrow(reliability_adjust_full), by=1), 
+    labels = NULL  # Optionally use hospital IDs as labels
+  ) +
+  scale_y_continuous(breaks=seq(0,1.0, by=0.2), 
+                     labels = scales::percent, 
+                     limits = c(0,1.0)) +
+  MetBrewer::scale_color_met_d("Hokusai3") + #MetBrewer has many pallettes to choose from
+  labs(
+    x = "Hospitals\nRanked by COVID Period Proning Use",
+    y = "% Eligible Patients Proned Within 12 Hours",
+    caption = "Error bars represent 95% credible intervals"
+  )  +
+  theme_minimal() +
+  theme(panel.grid.major.x=element_blank(),
+        panel.grid.minor.x=element_blank(),
+        panel.grid.minor.y=element_blank())
+
+ggsave('stacked_caterpillar.pdf', 
+       path = paste0(project_location, '/summary_output/graphs/'),
+       width = 12,       # adjust width to make it wide
+       height = 6,       # adjust height for PowerPoint-friendly proportions
+       units = "in")    # units set to inches for precise control)
+
+stacked2 <- ggplot(stacked_data, 
+                              aes(x = hospital_rank,
+                                  y = adjust_rate)) +
+  geom_line(aes(x = hospital_rank,
+                y = adjust_rate, group=study_period, linetype=study_period),  color = 'black') +
+  geom_linerange(aes(ymin = ci_low, ymax = ci_hi, color= Hospital_Type), linewidth=0.75, alpha = 0.4) +
+  geom_point(aes(color=Hospital_Type, shape=study_period), size = 2) +  # Add points for center effects
+  scale_x_continuous(
+    breaks = seq(1, nrow(reliability_adjust_full), by=1), 
+    labels = NULL  # Optionally use hospital IDs as labels
+  ) +
+  scale_y_continuous(breaks=seq(0,1.0, by=0.2), 
+                     labels = scales::percent, 
+                     limits = c(0,1.0)) +
+  MetBrewer::scale_color_met_d("Demuth") + #MetBrewer has many pallettes to choose from
+  labs(
+    x = "Hospitals\nRanked by COVID Period Proning Use",
+    y = "% Eligible Patients Proned Within 12 Hours",
+    caption = "Error bars represent 95% credible intervals"
+  )  +
+  theme_minimal() +
+  theme(panel.grid.major.x=element_blank(),
+        panel.grid.minor.x=element_blank(),
+        panel.grid.minor.y=element_blank(),
+        legend.position = c(0.15, 0.75),
+        legend.background = element_rect(fill = "white", color = "grey"))
+
+ggsave('stacked_caterpillar2.pdf', 
+       path = paste0(project_location, '/summary_output/graphs/'),
+       width = 12,       # adjust width to make it wide
+       height = 6,       # adjust height for PowerPoint-friendly proportions
+       units = "in")    # units set to inches for precise control)
+
+stacked_data <- stacked_data |>
+  group_by(study_period) |>
+  mutate(period_n=sum(n_patients)) |>
+  ungroup()
+
+stacked3 <- ggplot(stacked_data, 
+                   aes(x = hospital_rank,
+                       y = adjust_rate)) +
+  geom_line(aes(x = hospital_rank,
+                y = adjust_rate, group=study_period, alpha=period_n),  color = 'black') +
+  geom_linerange(aes(ymin = ci_low, ymax = ci_hi, color= Hospital_Type), linewidth=0.75, alpha = 0.4) + scale_alpha(guide="none")+
+  geom_point(aes(color=Hospital_Type, shape=study_period), size = 2.25) +  # Add points for center effects
+  scale_x_continuous(
+    breaks = seq(1, nrow(reliability_adjust_full), by=1), 
+    labels = NULL  # Optionally use hospital IDs as labels
+  ) +
+  scale_y_continuous(breaks=seq(0,1.0, by=0.2), 
+                     labels = scales::percent, 
+                     limits = c(0,1.0)) +
+  MetBrewer::scale_color_met_d("Egypt") + #MetBrewer has many pallettes to choose from
+  labs(
+    x = "Hospitals\nRanked by Pandemic Period Proning Use",
+    y = "% Eligible Patients Proned Within 12 Hours",
+    caption = "Error bars represent 95% credible intervals", 
+    shape="Study Period", 
+    color= "Hospital Type"
+  )  +
+  scale_shape_manual(values= c("circle", "triangle", "square"), labels=c("Pandemic", "Post-pandemic", "Pre-pandemic"))+
+  theme_classic() +
+  theme(panel.grid.major.x=element_blank(),
+        panel.grid.minor.x=element_blank(),
+        panel.grid.minor.y=element_blank(),
+        legend.position = c(0.15, 0.75),
+        legend.background = element_rect(fill = "white", color = "grey"))
+
+ggsave('stacked_caterpillar3.pdf', 
+       path = paste0(project_location, '/summary_output/graphs/'),
+       width = 12,       # adjust width to make it wide
+       height = 6,       # adjust height for PowerPoint-friendly proportions
+       units = "in")    # units set to inches for precise control)
+
+```
+
+```{r Median Odds Ratio from Fully Adjusted Model}
+posterior <- as_draws_df(agg_brm_period_full)
+
+# Extract the standard deviations (SDs) for each study_period random effect
+sd_pre <- posterior$`sd_hospital_id__study_periodPreMCOVID`
+sd_covid <- posterior$`sd_hospital_id__study_periodCOVID`
+sd_post <- posterior$`sd_hospital_id__study_periodPostMCOVID`
+
+#3 Calculate MOR for Each Period
+# MOR calculation function
+calc_mor <- function(sd_samples) {
+  exp(sqrt(2) * sd_samples * qnorm(0.75))  # qnorm(0.75) ~ 0.674
+}
+
+# Compute MORs
+mor_pre <- calc_mor(sd_pre)
+mor_covid <- calc_mor(sd_covid)
+mor_post <- calc_mor(sd_post)
+
+# Summarize
+mor_summary <- data.frame(
+  Period = c("Pre-MCOVID", "COVID", "Post-MCOVID"),
+  MOR_Mean = c(mean(mor_pre), mean(mor_covid), mean(mor_post)),
+  MOR_Median = c(median(mor_pre), median(mor_covid), median(mor_post)),
+  MOR_2.5 = c(quantile(mor_pre, 0.025), quantile(mor_covid, 0.025), quantile(mor_post, 0.025)),
+  MOR_97.5 = c(quantile(mor_pre, 0.975), quantile(mor_covid, 0.975), quantile(mor_post, 0.975))
+)
+
+print(mor_summary)
+
+#Visualize
+mor_df <- data.frame(
+  MOR = c(mor_covid, mor_pre, mor_post),
+  Period = factor(rep(c("COVID", "Pre-MCOVID", "Post-MCOVID"), each = length(mor_covid)))
+)
+
+ggplot(mor_df, aes(x = MOR, fill = Period)) +
+  geom_density(alpha = 0.5) +
+  labs(
+    title = "Period-Specific Median Odds Ratios (MOR  \n (Fully Adjusted))",
+    x = "Median Odds Ratio (MOR)",
+    y = "Density"
+  ) +
+  scale_x_continuous(seq(1,20, by=1), limits =c(1,20),
+                     name='Distribution of Median Odds Ratos by Study Period') +
+  theme_minimal()
+ggsave('mor_distribution_fully.pdf', 
+       path = paste0(project_location, '/summary_output/graphs/'))
+```
+
+
+```{r COVID Status}
+#Bayesian Hierarchial Model with Random Effects for Hospital and Study Period 
+#Adjusted for COVID Status
+
+#First Prepare Dataset
+#Open Aggregate Data with COVID
+df_agg_covid <- read.csv(paste0(project_location, '/summary_output/aggregate_data_wcovid.csv')) |>
+  #Prepare to merge in Hospital Details
+  mutate(
+    hospital_id=fifelse(
+        hospital_id=='HUP', 'penn_hup', hospital_id),
+    hospital_id=fifelse(
+      hospital_id=='HUPME', 'penn_hupme', hospital_id),
+    hospital_id=fifelse(
+      hospital_id=='PAH', 'penn_pah', hospital_id),
+    hospital_id=fifelse(
+      hospital_id=='PPMC', 'penn_ppmc', hospital_id),
+    hospital_id=fifelse(
+      hospital_id=='UMCOP', 'penn_umcop', hospital_id),
+    hospital_id=fifelse(
+      hospital_id=='CCH', 'penn_cch', hospital_id)
+    )
+
+#Merge Hospital Data Into DF AGG
+df_agg_covid <- df_agg_covid |>
+  left_join(clif_hospital_description %>% select(hospital_id, Hospital_Type, Number_of_ICU_Beds)) |>
+  #Define Hospital_Size Categorical Variable
+  mutate(icu_bed_cat=fcase(
+   Number_of_ICU_Beds<20, 0,
+   Number_of_ICU_Beds>=20 & Number_of_ICU_Beds<50, 1,
+   Number_of_ICU_Beds>=50, 2
+  )) |>
+ ## 1. numeric 0 / 1 / 2 bucket --------------------------------------------
+  mutate(
+    icu_bed_cat = fcase(
+      Number_of_ICU_Beds < 20,                           0L,      # small
+      Number_of_ICU_Beds >= 20 & Number_of_ICU_Beds < 50, 1L,      # medium
+      Number_of_ICU_Beds >= 50,                           2L,      # large
+      default = NA_integer_
+    )
+  ) %>% 
+  ## 2. labelled factor ------------------------------------------------------
+  mutate(
+    icu_bed_cat = factor(
+      icu_bed_cat,
+      levels = 0:2,                                    # make sure levels match
+      labels = c("small", "medium", "large")
+    )
+  )
+
+#Create Row For Each Proned Summary Data and Unproned Summary Data
+df_agg_unproned_covid <- df_agg_covid
+df_agg_proned_covid <- df_agg_unproned_covid %>%
+  mutate(n_patients = observed_prone, prone_12hour_outcome = 1)
+df_agg_unproned_covid <- df_agg_unproned_covid |>
+  mutate(n_patients = not_prone, observed_prone = 0, prone_12hour_outcome = 0)
+df_agg_covid <- bind_rows(df_agg_proned_covid, df_agg_unproned_covid) |>
+  #Only have the propensity at the period and outcome level so need to add period back here
+  mutate(study_period=fcase(
+    period_sarscov2=='COVID_SarsCov2Neg-Unk', 'COVID',
+    period_sarscov2=='COVID_SarsCov2Pos', 'COVID',
+    period_sarscov2=='Post-COVID_SarsCov2Neg-Unk', 'Post-COVID',
+    period_sarscov2=='Post-COVID_SarsCov2Pos', 'Post-COVID',
+    period_sarscov2=='Pre-COVID', 'Pre-COVID'
+  ))
+
+
+#Merge in Proning Adjusted Rate for Each Hospital By Proned/Unproned Status
+#Merge Back with DF Agg COVID
+df_agg_covid <- left_join(df_agg_covid, global_agg_byoutcome_period) |>
+  #IF there were no patients proned can use the popensity for unproned patients by filling here
+  group_by(hospital_id, period_sarscov2) |>
+  arrange(hospital_id, period_sarscov2, prone_12hour_outcome) |>
+  fill(prone_log_odds, .direction = 'down') |>
+  ungroup()
+```
+
+
+```{r COVID Status Model}
+set.seed(32284)
+
+priors <- c(
+  #Pre-COVID Proning Prior: Weakly Informative Centered Around Prob of Proning of 12% with 95% of prior probability in  5-50% rnage
+  prior(normal(-2, 1), class = "b", coef = 'period_sarscov2PreMCOVID'),  
+  #COVID Period Proning Prior: Weakly Informative Centered Around Prob of Proning of 50% in COVID era and with 95% of these probability ranging from 12-88%
+  prior(normal(0, 1), class = "b", coef = 'period_sarscov2COVID_SarsCov2Pos'),
+  prior(normal(0, 1), class = "b", coef = 'period_sarscov2COVID_SarsCov2NegMUnk'),
+  #Post-COVID Period Proning Prior: Weakly Informative Centered Around Prob of Proning of 12% in COVID era and with 95% of these probability ranging from 5-50%
+  prior(normal(-2, 1), class = "b", coef = 'period_sarscov2PostMCOVID_SarsCov2Pos'), 
+  prior(normal(-2, 1), class = "b", coef = 'period_sarscov2PostMCOVID_SarsCov2NegMUnk'), 
+  #Flat Priors for Hospital Type and Size
+  prior(normal(0,1), class = "b", coef = 'Hospital_TypeCommunity'),
+  #Half Normal Weakly Informative but Regularizing Prior for Random Effects
+  prior(normal(0,1), class = "sd"))         
+
+#Bayesian Hierarchical Model with varying slopes by study_period
+agg_brm_period_covid <- brm(
+  bf(observed_prone | trials(n_patients) ~ 
+       0 + offset(prone_log_odds) + period_sarscov2 + Hospital_Type +
+       (0 + period_sarscov2 | hospital_id)), 
+  data = df_agg_covid,
+  family = binomial,
+  prior = priors, 
+  cores = 4,
+  control = list(adapt_delta = 0.99)
+)
+
+plot(agg_brm_period_covid)
+summary(agg_brm_period_covid)
+
+#Compare Differences in COVID vs Not COVID in COVID and POST COVID Period
+post_covid <- as_draws_df(agg_brm_period_covid)
+
+# Compute OR for the contrast
+delta_covid_period <- post_covid$b_period_sarscov2COVID_SarsCov2Pos - post_covid$b_period_sarscov2COVID_SarsCov2NegMUnk
+or <- exp(delta_covid_period)
+
+# Summarize
+posterior_summary <- quantile(or, probs = c(0.5, 0.025, 0.975))
+cat('Odds Ratio and 95 Credible Interview for COVID vs Not COVID During COVID Period \n', posterior_summary)
+
+# Compute OR for the contrast Of COVID vs NOT COVID in POST COVID Period
+delta_post_covid_period <- post_covid$b_period_sarscov2PostMCOVID_SarsCov2Pos - post_covid$b_period_sarscov2PostMCOVID_SarsCov2NegMUnk
+or <- exp(delta_post_covid_period)
+
+# Summarize
+posterior_summary <- quantile(or, probs = c(0.5, 0.025, 0.975))
+cat('\nOdds Ratio and 95 Credible Interview for COVID vs Not COVID During Post-COVID Period \n', posterior_summary)
+
+#COVID Negative in COVID Period vs Pre-COVID
+# Compute OR for the contrast Of COVID vs NOT COVID in POST COVID Period
+delta_post_covid_period <- post_covid$b_period_sarscov2PostMCOVID_SarsCov2NegMUnk - post_covid$b_period_sarscov2PreMCOVID
+or <- exp(delta_post_covid_period)
+
+# Summarize
+posterior_summary <- quantile(or, probs = c(0.5, 0.025, 0.975))
+cat('\nOdds Ratio and 95 Credible Interview for SARS-CoV2 Neg in COVID vs Pre-COVID \n', posterior_summary)
+```
+
+
+```{r Bayesian Hierarchical Models as Sensitivity for Primary Analysis}
+#Use Methods from Yarnell et al (PMID: 31359459)
+#Bayesian Hierarchial Model with Random Effects for Hospital and Study Period 
+
+set.seed(32284)
+
+priors <- c(
+  #Pre-COVID Proning Prior: Weakly Informative Centered Around Prob of Proning of 12% with 95% of prior probability in  5-50% rnage
+  prior(normal(-2, 1), class = "b", coef = 'study_periodPreMCOVID'),  
+  #COVID Proning Prior: Weakly Informative Centered Around Prob of Proning of 50% in COVID era and with 95% of these probability ranging from 12-88%
+  prior(normal(0, 1), class = "b", coef = 'study_periodCOVID'),
+  #Post-COVID Proning Prior: Weakly Informative Centered Around Prob of Proning of 12% in COVID era and with 95% of these probability ranging from 5-50%
+  prior(normal(-2, 1), class = "b", coef = 'study_periodPostMCOVID'), 
+  #Half Normal Weakly Informative but Regularizing Prior for Random Effects
+  prior(normal(0,1), class = "sd"))         
+
+#Bayesian Hierarchical Model with varying slopes by study_period
+agg_brm_period_strat <- brm(
+  bf(observed_prone | trials(n_patients) ~ 
+       0 + offset(prone_log_odds) + study_period + (0 + study_period | hospital_id)), 
+  data = df_agg,
+  family = binomial,
+  prior = priors, 
+  cores = 4,
+  control = list(adapt_delta = 0.99)
+)
+
+# Examine model fit and summaries
+plot(agg_brm_period_strat)
+summary(agg_brm_period_strat)
+
+#Posterior Draws
+sensitivity_posterior <- as_draws_df(agg_brm_period_strat) |>
+  mutate(covid_v_pre_covid=exp(b_study_periodCOVID-b_study_periodPreMCOVID),
+         covid_v_post_covid=exp(b_study_periodCOVID-b_study_periodPostMCOVID),
+         pre_covid_v_covid=exp(b_study_periodPreMCOVID-b_study_periodCOVID),
+         post_covid_v_covid=exp(b_study_periodPostMCOVID-b_study_periodCOVID))
+
+sensitivity_table <- data.frame(
+  variable = c('COVID_v_Pre-COVID',
+               'COVID_v_Post-COVID',
+               'Pre-COVID_v_COVID',
+               'Post-COVID_v_COVID'),
+  or = c(median(sensitivity_posterior$covid_v_pre_covid),
+         median(sensitivity_posterior$covid_v_post_covid),
+         median(sensitivity_posterior$pre_covid_v_covid),
+         median(sensitivity_posterior$post_covid_v_covid)),
+  conf.low=c(quantile(sensitivity_posterior$covid_v_pre_covid, p=0.05),
+         quantile(sensitivity_posterior$covid_v_post_covid, p=0.05),
+         quantile(sensitivity_posterior$pre_covid_v_covid, p=0.05),
+         quantile(sensitivity_posterior$post_covid_v_covid, p=0.05)),
+  conf.high=c(quantile(sensitivity_posterior$covid_v_pre_covid, p=0.95),
+         quantile(sensitivity_posterior$covid_v_post_covid, p=0.95),
+         quantile(sensitivity_posterior$pre_covid_v_covid, p=0.95),
+         quantile(sensitivity_posterior$post_covid_v_covid, p=0.95)))
+print(sensitivity_table)
+write.csv(sensitivity_table, paste0(project_location, '/summary_output/sensitivity_table.csv'))
+```
