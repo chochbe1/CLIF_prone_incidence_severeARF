@@ -15,6 +15,8 @@ file_type <- 'csv'
 if (!dir.exists(paste0(project_location, "/summary_analysis"))) {
   dir.create(paste0(project_location, "/summary_analysis"))
 }
+
+set.seed(3221984)
 ```
 
 
